@@ -1,15 +1,15 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import Link from "next/link";
 import { JobCard } from "@/components/JobCard";
+import { JobDrawer } from "@/components/JobDrawer";
+import { AddJobDialog } from "@/components/AddJobDialog";
 import { SearchModal } from "@/components/SearchModal";
 import { SearchInsights } from "@/components/SearchInsights";
-import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Card, CardContent } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
 	Empty,
@@ -20,19 +20,26 @@ import {
 	EmptyTitle,
 } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useConfirm } from "@/components/ConfirmDialog";
 import {
 	Search,
+	MapPin,
 	Loader2,
 	Trash2,
+	Bookmark,
+	CheckSquare,
 	Sparkles,
 	Briefcase,
-	BookmarkCheck,
-	Gauge,
 	TriangleAlert,
+	Cpu,
+	FileText,
+	Plus,
+	X,
 } from "lucide-react";
 import { useI18n } from "@/components/I18nProvider";
 
 const DISCOVER_STATE_KEY = "rorilo_discover_state";
+const TRIAGE_CHUNK_SIZE = 15;
 // Module-level cache preserves jobs during SPA navigation (like clicking a job and hitting back).
 // This allows the page to render synchronously on back-navigation, making native browser
 // scroll restoration work perfectly without layout shifts.
@@ -41,8 +48,10 @@ let cachedProfileReady = false;
 let cachedTotalJobsInDb: number | null = null;
 let cachedGlobalStats: any = null;
 
+type TriageFilter = "all" | "WORTH_APPLYING" | "MAYBE" | "SAVED" | "SKIP";
+
 export default function JobsPage() {
-	const { t } = useI18n();
+	const { t, locale } = useI18n();
 	const [jobs, setJobs] = useState<any[]>(cachedJobs || []);
 	const [totalJobsInDb, setTotalJobsInDb] = useState<number | null>(cachedTotalJobsInDb);
 	const [globalStats, setGlobalStats] = useState<any>(cachedGlobalStats);
@@ -56,55 +65,94 @@ export default function JobsPage() {
 	const [activeTab, setActiveTab] = useState<"best" | "newest" | "saved">(
 		"best",
 	);
+	const [triageFilter, setTriageFilter] = useState<TriageFilter>("all");
 	const [isSearchModalOpen, setIsSearchModalOpen] = useState(false);
-	const [selectedJobIds, setSelectedJobIds] = useState<string[]>([]);
+	const [isAddJobOpen, setIsAddJobOpen] = useState(false);
+	const [drawerJobId, setDrawerJobId] = useState<string | null>(null);
+	const [selecting, setSelecting] = useState(false);
+	const [selectedIds, setSelectedIds] = useState<string[]>([]);
 	const [bulkDeleting, setBulkDeleting] = useState(false);
 	const [triaging, setTriaging] = useState(false);
+	const [triageProgress, setTriageProgress] = useState<{ done: number; total: number } | null>(null);
 	const [triageError, setTriageError] = useState<string | null>(null);
-	const [deleteError, setDeleteError] = useState<string | null>(null);
+	const [bulkError, setBulkError] = useState<string | null>(null);
+	const [bulkSaving, setBulkSaving] = useState(false);
 	const [profileReady, setProfileReady] = useState(cachedProfileReady);
 	const [hasRestoredState, setHasRestoredState] = useState(false);
 	const [searchInsightsRefresh, setSearchInsightsRefresh] = useState(0);
 	const abortControllerRef = useRef<AbortController | null>(null);
+	// Last card toggled by the user; the anchor for shift-click range selection.
+	const selectionAnchorRef = useRef<string | null>(null);
+	// Ordered ids of the cards currently on screen, read by the stable toggle callback.
+	const visibleIdsRef = useRef<string[]>([]);
+	const confirm = useConfirm();
 
-	const skippedJobs = jobs.filter((job) => job.match?.triageStatus === "SKIP");
-	const savedCount = jobs.filter(
-		(job) => job.application?.status === "SAVED",
-	).length;
-	const worthApplyingCount = jobs.filter(
-		(job) => job.match?.triageStatus === "WORTH_APPLYING",
-	).length;
-	const scoredJobs = jobs.filter((job) => job.match);
-	const avgScore =
-		scoredJobs.length > 0
-			? `${Math.round(scoredJobs.reduce((sum, job) => sum + (job.match?.matchScore ?? 0), 0) / scoredJobs.length)}%`
-			: "--";
+	// Single pass over jobs for queue counts.
+	const triageCounts = useMemo(() => {
+		const counts = { all: 0, WORTH_APPLYING: 0, MAYBE: 0, SKIP: 0, SAVED: 0, UNSCORED: 0 };
+		for (let i = 0; i < jobs.length; i++) {
+			const job = jobs[i];
+			const status = job.match?.triageStatus;
+			if (job.application?.status === "SAVED") counts.SAVED++;
+			if (status === "SKIP") {
+				counts.SKIP++;
+				continue;
+			}
+			counts.all++;
+			if (status === "WORTH_APPLYING") counts.WORTH_APPLYING++;
+			else if (status === "MAYBE") counts.MAYBE++;
+			else counts.UNSCORED++;
+		}
+		return counts;
+	}, [jobs]);
+
+	// "All" is the working queue: everything except skipped.
+	const visibleJobs = useMemo(() => {
+		if (triageFilter === "all") return jobs.filter((j) => j.match?.triageStatus !== "SKIP");
+		if (triageFilter === "SAVED") return jobs.filter((j) => j.application?.status === "SAVED");
+		return jobs.filter((j) => j.match?.triageStatus === triageFilter);
+	}, [jobs, triageFilter]);
+
+	// Keep the selection to jobs still on screen, so bulk actions never act on hidden items.
+	useEffect(() => {
+		const ids = visibleJobs.map((job) => job.id);
+		visibleIdsRef.current = ids;
+		const onScreen = new Set(ids);
+		setSelectedIds((current) => {
+			const next = current.filter((id) => onScreen.has(id));
+			return next.length === current.length ? current : next;
+		});
+	}, [visibleJobs]);
+
 	const matchingPaused = jobs.length > 0 && !profileReady;
-	const unscoredBacklog =
-		jobs.length > 0 && profileReady && scoredJobs.length === 0;
+	const hasJobs = totalJobsInDb !== null ? totalJobsInDb > 0 : jobs.length > 0;
 
-	const stats = [
-		{
-			icon: Briefcase,
-			value: globalStats ? String(globalStats.visible) : "0",
-			label: t("discover.stats.visible"),
-		},
-		{
-			icon: BookmarkCheck,
-			value: globalStats ? String(globalStats.saved) : "0",
-			label: t("discover.stats.saved"),
-		},
-		{
-			icon: Sparkles,
-			value: globalStats ? String(globalStats.worthApplying) : "0",
-			label: t("discover.stats.worth"),
-		},
-		{ 
-			icon: Gauge, 
-			value: globalStats && globalStats.avgScore !== null ? `${globalStats.avgScore}%` : "--", 
-			label: t("discover.stats.avg") 
-		},
-	];
+	// Locale comes from localStorage after mount; rendering the date only on
+	// the client avoids a server/client text mismatch (React hydration #418).
+	const [mounted, setMounted] = useState(false);
+	useEffect(() => {
+		setMounted(true);
+	}, []);
+
+	const dateLine = useMemo(() => {
+		if (!mounted) return "";
+		try {
+			return new Intl.DateTimeFormat(locale, {
+				weekday: "long",
+				month: "long",
+				day: "numeric",
+			}).format(new Date());
+		} catch {
+			return "";
+		}
+	}, [locale, mounted]);
+
+	const heroSub =
+		triageCounts.WORTH_APPLYING > 0
+			? t("discover.hero.high", { count: triageCounts.WORTH_APPLYING })
+			: triageCounts.UNSCORED > 0
+				? t("discover.hero.review", { count: triageCounts.UNSCORED })
+				: t("discover.hero.clear");
 
 	const fetchJobs = useCallback(
 		async (override?: {
@@ -137,24 +185,18 @@ export default function JobsPage() {
 					signal: abortController.signal,
 				});
 				const data = await res.json();
-				
+
 				const newJobs = data.jobs || [];
 				setJobs(newJobs);
 				setTotalJobsInDb(data.totalJobsInDb ?? 0);
 				setGlobalStats(data.globalStats ?? null);
 				setProfileReady(Boolean(data.profileReady));
-				
+
 				// Update memory cache for synchronous render on back-navigation
 				cachedJobs = newJobs;
 				cachedTotalJobsInDb = data.totalJobsInDb ?? 0;
 				cachedGlobalStats = data.globalStats ?? null;
 				cachedProfileReady = Boolean(data.profileReady);
-
-				setSelectedJobIds((current) =>
-					current.filter((jobId) =>
-						newJobs.some((job: any) => job.id === jobId),
-					),
-				);
 			} catch (err: any) {
 				if (err.name === "AbortError") return; // Ignore aborted requests silently
 				console.error(err);
@@ -186,6 +228,9 @@ export default function JobsPage() {
 				if (["best", "newest", "saved"].includes(parsed.activeTab)) {
 					setActiveTab(parsed.activeTab);
 				}
+				if (["all", "WORTH_APPLYING", "MAYBE", "SAVED", "SKIP"].includes(parsed.triageFilter)) {
+					setTriageFilter(parsed.triageFilter);
+				}
 			}
 		} catch {}
 		setHasRestoredState(true);
@@ -197,10 +242,10 @@ export default function JobsPage() {
 		try {
 			localStorage.setItem(
 				DISCOVER_STATE_KEY,
-				JSON.stringify({ searchQuery, locationQuery, remoteFilter, activeTab }),
+				JSON.stringify({ searchQuery, locationQuery, remoteFilter, activeTab, triageFilter }),
 			);
 		} catch {}
-	}, [searchQuery, locationQuery, remoteFilter, activeTab, hasRestoredState]);
+	}, [searchQuery, locationQuery, remoteFilter, activeTab, triageFilter, hasRestoredState]);
 
 	// Debounce: sync input display values → debounced query values after 400ms idle
 	useEffect(() => {
@@ -217,7 +262,8 @@ export default function JobsPage() {
 			setLocationQuery(locationInput);
 		}, 400);
 		return () => clearTimeout(timer);
-	}, [locationInput, hasRestoredState]);	// Fetch jobs whenever the debounced query values or filters change
+	}, [locationInput, hasRestoredState]);
+	// Fetch jobs whenever the debounced query values or filters change
 	// Note: First render from cache is synchronous so we don't need to fetch
 	// if we restored from cache AND query parameters haven't changed yet.
 	useEffect(() => {
@@ -228,36 +274,101 @@ export default function JobsPage() {
 		return () => clearTimeout(handler);
 	}, [fetchJobs, hasRestoredState]);
 
-	const toggleJobSelection = (jobId: string) => {
-		setSelectedJobIds((current) =>
-			current.includes(jobId)
-				? current.filter((id) => id !== jobId)
-				: [...current, jobId],
-		);
-	};
+	// A plain click toggles one card; shift-click applies the clicked card's new state
+	// to every card between it and the last card toggled.
+	const toggleSelect = useCallback((jobId: string, extendRange = false) => {
+		const anchor = selectionAnchorRef.current;
+		const orderedIds = visibleIdsRef.current;
+		setSelectedIds((current) => {
+			const shouldSelect = !current.includes(jobId);
+			if (extendRange && anchor && anchor !== jobId) {
+				const from = orderedIds.indexOf(anchor);
+				const to = orderedIds.indexOf(jobId);
+				if (from !== -1 && to !== -1) {
+					const next = new Set(current);
+					for (const id of orderedIds.slice(Math.min(from, to), Math.max(from, to) + 1)) {
+						if (shouldSelect) next.add(id);
+						else next.delete(id);
+					}
+					return [...next];
+				}
+			}
+			return shouldSelect
+				? [...current, jobId]
+				: current.filter((id) => id !== jobId);
+		});
+		selectionAnchorRef.current = jobId;
+	}, []);
 
-	const toggleAllVisible = () => {
-		const visibleIds = jobs.map((job) => job.id);
-		const allVisibleSelected =
-			visibleIds.length > 0 &&
-			visibleIds.every((id) => selectedJobIds.includes(id));
-		setSelectedJobIds(allVisibleSelected ? [] : visibleIds);
-	};
+	// Stable callbacks keep memoized cards from re-rendering on every keystroke.
+	const handleSaveToggle = useCallback(() => {
+		fetchJobs();
+	}, [fetchJobs]);
 
-	const handleBulkDelete = async () => {
-		if (selectedJobIds.length === 0) return;
-		const shouldDelete = window.confirm(
-			t("discover.deleteConfirmSelected", {
-				count: selectedJobIds.length,
-				plural: selectedJobIds.length === 1 ? "" : "s",
+	const exitSelecting = useCallback(() => {
+		setSelecting(false);
+		setSelectedIds([]);
+		selectionAnchorRef.current = null;
+	}, []);
+
+	// Escape leaves select mode and Ctrl/Cmd+A selects all visible jobs, unless a dialog is open.
+	useEffect(() => {
+		if (!selecting) return;
+		const onKeyDown = (event: KeyboardEvent) => {
+			const dialogOpen = document.querySelector('[role="dialog"], [role="alertdialog"]');
+			if (dialogOpen) return;
+			if (event.key === "Escape") {
+				exitSelecting();
+				return;
+			}
+			// Ctrl/Cmd+A selects every visible job, but leaves text fields alone.
+			const target = event.target as HTMLElement | null;
+			const typing = !!target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
+			if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a" && !typing) {
+				event.preventDefault();
+				setSelectedIds(visibleIdsRef.current);
+			}
+		};
+		window.addEventListener("keydown", onKeyDown);
+		return () => window.removeEventListener("keydown", onKeyDown);
+	}, [selecting, exitSelecting]);
+
+	// Bulk-removed jobs leave the list and the back-navigation cache at once.
+	const removeJobsLocally = useCallback((ids: string[]) => {
+		const drop = new Set(ids);
+		cachedJobs = (cachedJobs || []).filter((job: any) => !drop.has(job.id));
+		setJobs((current) => current.filter((job) => !drop.has(job.id)));
+	}, []);
+
+	// Jobs already past the saved stage (applying, interviews, ...) keep their status,
+	// so only unsaved and ignored selections are eligible for bulk save.
+	const saveableSelectedIds = useMemo(() => {
+		const picked = new Set(selectedIds);
+		return jobs
+			.filter(
+				(job) =>
+					picked.has(job.id) &&
+					(!job.application || job.application.status === "NEW" || job.application.status === "IGNORED"),
+			)
+			.map((job) => job.id as string);
+	}, [jobs, selectedIds]);
+
+	const handleDeleteSelected = async () => {
+		if (selectedIds.length === 0) return;
+		const ok = await confirm({
+			title: t("discover.deleteConfirmSelected", {
+				count: selectedIds.length,
+				plural: selectedIds.length === 1 ? "" : "s",
 			}),
-		);
-		if (!shouldDelete) return;
+			confirmLabel: t("discover.deleteSelected"),
+			tone: "danger",
+		});
+		if (!ok) return;
 
 		setBulkDeleting(true);
-		setDeleteError(null);
+		setBulkError(null);
 		try {
-			const idsToDelete = [...selectedJobIds];
+			const idsToDelete = [...selectedIds];
 			const res = await fetch("/api/jobs", {
 				method: "DELETE",
 				headers: { "Content-Type": "application/json" },
@@ -265,33 +376,69 @@ export default function JobsPage() {
 			});
 			const data = await res.json().catch(() => ({}));
 			if (res.ok) {
-				setJobs((current) =>
-					current.filter((job) => !idsToDelete.includes(job.id)),
-				);
-				setSelectedJobIds([]);
+				removeJobsLocally(idsToDelete);
+				exitSelecting();
+				fetchJobs();
 			} else {
-				setDeleteError(data.error || t("discover.deleteSelectedFailed"));
+				setBulkError(data.error || t("discover.deleteSelectedFailed"));
 			}
 		} catch (err) {
-			setDeleteError((err as Error).message);
+			setBulkError((err as Error).message);
 			console.error(err);
 		} finally {
 			setBulkDeleting(false);
 		}
 	};
 
+	const handleSaveSelected = async () => {
+		if (saveableSelectedIds.length === 0 || bulkSaving) return;
+		const idsToSave = [...saveableSelectedIds];
+		setBulkSaving(true);
+		setBulkError(null);
+		try {
+			const outcomes = await Promise.allSettled(
+				idsToSave.map((jobId) =>
+					fetch("/api/applications", {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({ jobId, status: "SAVED" }),
+					}).then((res) => res.ok),
+				),
+			);
+			const failed = outcomes.filter((o) => o.status === "rejected" || !o.value).length;
+			if (failed > 0) {
+				// Keep the selection so the user can retry the jobs that did not save.
+				setBulkError(t("discover.saveSelectedFailed", { count: failed }));
+			} else {
+				exitSelecting();
+			}
+		} finally {
+			setBulkSaving(false);
+			fetchJobs();
+		}
+	};
+
+	const handleDeleteJob = useCallback((jobId: string) => {
+		cachedJobs = (cachedJobs || []).filter((item: any) => item.id !== jobId);
+		setJobs((current) =>
+			current.filter((item) => item.id !== jobId),
+		);
+	}, []);
+
 	const handleDeleteSkipped = async () => {
 		if (!globalStats || globalStats.skipped === 0) return;
-		const shouldDelete = window.confirm(
-			t("discover.deleteConfirmSkipped", {
+		const shouldDelete = await confirm({
+			title: t("discover.deleteConfirmSkipped", {
 				count: globalStats.skipped,
 				plural: globalStats.skipped === 1 ? "" : "s",
 			}),
-		);
+			confirmLabel: t("discover.deleteSkipped", { count: globalStats.skipped }),
+			tone: "danger",
+		});
 		if (!shouldDelete) return;
 
 		setBulkDeleting(true);
-		setDeleteError(null);
+		setBulkError(null);
 		try {
 			const res = await fetch("/api/jobs", {
 				method: "DELETE",
@@ -303,335 +450,370 @@ export default function JobsPage() {
 				setJobs((current) =>
 					current.filter((job) => job.match?.triageStatus !== "SKIP"),
 				);
-				setSelectedJobIds((current) =>
-					current.filter((id) => !jobs.find(j => j.id === id && j.match?.triageStatus === "SKIP")),
-				);
 				fetchJobs(); // Refresh stats
 			} else {
-				setDeleteError(data.error || t("discover.deleteSkippedFailed"));
+				setBulkError(data.error || t("discover.deleteSkippedFailed"));
 			}
 		} catch (err) {
-			setDeleteError((err as Error).message);
+			setBulkError((err as Error).message);
 			console.error(err);
 		} finally {
 			setBulkDeleting(false);
 		}
 	};
 
+	// The triage API handles at most TRIAGE_CHUNK_SIZE explicit job ids per request, so
+	// larger lists are sent in sequence. Sending everything at once used to leave jobs past
+	// the server cap untriaged, and every retry hit the same first batch.
 	const handleTriageVisible = async () => {
-		if (jobs.length === 0) return;
+		const ids = jobs.map((job) => job.id);
+		if (ids.length === 0) return;
 		setTriaging(true);
 		setTriageError(null);
+		setTriageProgress({ done: 0, total: ids.length });
 		try {
-			const res = await fetch("/api/jobs/triage", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ jobIds: jobs.map((job) => job.id) }),
-			});
-			const data = await res.json().catch(() => ({}));
-			if (!res.ok || data.success === false) {
-				setTriageError(data.error || "Could not sort visible jobs.");
-				return;
+			for (let start = 0; start < ids.length; start += TRIAGE_CHUNK_SIZE) {
+				const chunk = ids.slice(start, start + TRIAGE_CHUNK_SIZE);
+				const res = await fetch("/api/jobs/triage", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ jobIds: chunk }),
+				});
+				const data = await res.json().catch(() => ({}));
+				if (!res.ok || data.success === false) {
+					setTriageError(data.error || "Could not sort visible jobs.");
+					break;
+				}
+				setTriageProgress({ done: start + chunk.length, total: ids.length });
 			}
-			await fetchJobs();
 		} catch (err) {
 			setTriageError((err as Error).message);
 		} finally {
 			setTriaging(false);
+			setTriageProgress(null);
+			await fetchJobs();
 		}
 	};
 
+	const pills: Array<{ id: TriageFilter; label: string }> = [
+		{ id: "all", label: t("discover.pills.all") },
+		{ id: "WORTH_APPLYING", label: t("jobcard.triageWorth") },
+		{ id: "MAYBE", label: t("jobcard.triageMaybe") },
+		{ id: "SAVED", label: t("discover.tabs.saved") },
+		{ id: "SKIP", label: t("jobcard.triageSkip") },
+	];
+
 	return (
 		<div className="flex-1 flex flex-col min-w-0 bg-background">
-			<PageHeader
-				title={t("discover.title")}
-				description={t("discover.description")}
-				actions={
-					<>
-						{jobs.length > 0 && (
-							<Button
-								onClick={handleTriageVisible}
-								size="sm"
-								variant="outline"
-								disabled={triaging}
-								className="text-sm h-9 px-3.5"
-							>
-								{triaging ? (
-									<Loader2 className="size-3.5 animate-spin" />
-								) : (
-									<Sparkles className="size-3.5" />
-								)}
-								<span>{t("discover.sortVisible")}</span>
+			<main className="px-4 sm:px-8 py-6 md:py-8 max-w-[920px] w-full mx-auto flex flex-col gap-6 motion-safe:animate-in motion-safe:fade-in-0 motion-safe:slide-in-from-bottom-1 motion-safe:duration-150">
+				{!hasJobs && !loading ? (
+					<section className="rounded-3xl bg-card border border-border p-8 sm:p-12 shadow-[0_16px_48px_-24px_rgba(19,20,23,0.25)]">
+						<p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+							{dateLine}
+						</p>
+						<h1 className="mt-3 text-3xl sm:text-[40px] leading-[1.05] font-heading text-balance max-w-[16ch]">
+							{t("discover.onboard.title")}
+						</h1>
+						<p className="mt-3 text-[15px] leading-relaxed text-muted-foreground text-pretty max-w-[52ch]">
+							{t("discover.onboard.desc")}
+						</p>
+						<ol className="mt-8 grid gap-3 sm:grid-cols-3">
+							{[
+								{ Icon: Cpu, title: t("discover.onboard.step1t"), desc: t("discover.onboard.step1d") },
+								{ Icon: FileText, title: t("discover.onboard.step2t"), desc: t("discover.onboard.step2d") },
+								{ Icon: Search, title: t("discover.onboard.step3t"), desc: t("discover.onboard.step3d") },
+							].map((step, i) => (
+								<li key={step.title} className="rounded-2xl bg-muted/60 p-4">
+									<span className="flex size-10 items-center justify-center rounded-2xl bg-card text-foreground shadow-xs">
+										<step.Icon className="size-5" aria-hidden="true" />
+									</span>
+									<p className="mt-3 text-sm font-semibold">
+										<span className="mr-1.5 tabular-nums text-muted-foreground">{i + 1}.</span>
+										{step.title}
+									</p>
+									<p className="mt-1 text-[13px] leading-relaxed text-muted-foreground">{step.desc}</p>
+								</li>
+							))}
+						</ol>
+						<div className="mt-8 flex flex-col sm:flex-row gap-2">
+							<Button size="lg" onClick={() => setIsSearchModalOpen(true)}>
+								{t("discover.findRoles")}
 							</Button>
-						)}
-						<SearchInsights refreshKey={searchInsightsRefresh} />
-						<Button
-							onClick={() => setIsSearchModalOpen(true)}
-							size="sm"
-							className="text-sm h-9 px-4"
-						>
-							{t("discover.findRoles")}
-						</Button>
-					</>
-				}
-			/>
-
-			<main className="p-6 md:p-10 max-w-4xl w-full mx-auto flex flex-col gap-6">
-				{(totalJobsInDb !== null ? totalJobsInDb > 0 : jobs.length > 0) && (
-					<Card size="sm">
-						<CardContent className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-							{stats.map((stat) => {
-								const Icon = stat.icon;
-								return (
-									<div key={stat.label} className="flex items-center gap-3">
-										<span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-											<Icon className="size-4" />
-										</span>
-										<span className="min-w-0">
-											<span className="block text-xl font-bold tracking-tight tabular-nums">
-												{stat.value}
-											</span>
-											<span className="block truncate text-xs text-muted-foreground">
-												{stat.label}
-											</span>
-										</span>
-									</div>
-								);
-							})}
-						</CardContent>
-					</Card>
-				)}
-
-				{/* Filters Bar */}
-				<div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
-					<div className="relative flex-1">
-						{loading ? (
-							<Loader2 className="size-4 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none animate-spin" />
-						) : (
-							<Search className="size-4 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-						)}
-						<Input
-							value={searchInput}
-							onChange={(e) => setSearchInput(e.target.value)}
-							placeholder={t("discover.searchPlaceholder")}
-							className="pl-9 text-sm h-9"
-						/>
-					</div>
-
-					<div className="w-full sm:w-44">
-						<Input
-							value={locationInput}
-							onChange={(e) => setLocationInput(e.target.value)}
-							placeholder={t("discover.locationPlaceholder")}
-							className="text-sm h-9"
-						/>
-					</div>
-
-					<div className="w-full sm:w-40">
-						<select
-							value={remoteFilter}
-							onChange={(e) => setRemoteFilter(e.target.value)}
-							aria-label={t("search.workplace")}
-							className="h-9 w-full rounded-lg border border-input bg-transparent px-3 py-1.5 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 text-neutral-800 cursor-pointer"
-						>
-							<option value="all">{t("discover.workplace.all")}</option>
-							<option value="remote">{t("discover.workplace.remote")}</option>
-							<option value="hybrid">{t("discover.workplace.hybrid")}</option>
-							<option value="onsite">{t("discover.workplace.onsite")}</option>
-						</select>
-					</div>
-				</div>
-
-				{/* View Tabs */}
-				<Tabs
-					value={activeTab}
-					onValueChange={(value) =>
-						setActiveTab(value as "best" | "newest" | "saved")
-					}
-				>
-					<TabsList>
-						<TabsTrigger value="best">
-							{t("discover.tabs.recommended")}
-						</TabsTrigger>
-						<TabsTrigger value="newest">
-							{t("discover.tabs.latest")}
-						</TabsTrigger>
-						<TabsTrigger value="saved">{t("discover.tabs.saved")}</TabsTrigger>
-					</TabsList>
-				</Tabs>
-
-				{triageError && (
-					<Alert variant="destructive">
-						<TriangleAlert />
-						<AlertDescription>{triageError}</AlertDescription>
-					</Alert>
-				)}
-
-				{deleteError && (
-					<Alert variant="destructive">
-						<TriangleAlert />
-						<AlertDescription>{deleteError}</AlertDescription>
-					</Alert>
-				)}
-
-				{matchingPaused && (
-					<Alert>
-						<TriangleAlert />
-						<AlertDescription className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-							<span>{t("discover.profileNeededDescription")}</span>
 							<Link
 								href="/setup"
-								className="inline-flex h-8 w-fit min-w-39.5 !no-underline items-center justify-center rounded-lg border border-input bg-background px-3 text-xs font-medium text-foreground hover:bg-accent hover:text-accent-foreground"
+								className="inline-flex h-12 items-center justify-center rounded-2xl px-6 text-[15px] font-semibold text-foreground hover:bg-muted motion-safe:transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none touch-manipulation"
 							>
 								{t("setup.firstRunAction")}
 							</Link>
-						</AlertDescription>
-					</Alert>
-				)}
+						</div>
+					</section>
+				) : (
+					<>
+						<div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+							<div>
+								<p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+									{dateLine}
+								</p>
+								<h1 className="mt-2 text-[28px] sm:text-4xl font-heading text-balance">
+									{t("discover.hero.title")}
+								</h1>
+								<p aria-live="polite" className="mt-1.5 text-[15px] text-muted-foreground">
+									{heroSub}
+								</p>
+							</div>
+							<div className="flex shrink-0 flex-col sm:flex-row gap-2 w-full sm:w-auto">
+								<Button variant="outline" size="lg" onClick={() => setIsAddJobOpen(true)} className="w-full sm:w-auto">
+									<Plus className="size-4" aria-hidden="true" />
+									{t("addjob.add")}
+								</Button>
+								<Button size="lg" onClick={() => setIsSearchModalOpen(true)} className="w-full sm:w-auto">
+									<Search className="size-4" aria-hidden="true" />
+									{t("discover.findRoles")}
+								</Button>
+							</div>
+						</div>
 
-				{unscoredBacklog && (
-					<Alert>
-						<TriangleAlert />
-						<AlertDescription className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-							<span>{t("discover.unscoredBacklogDescription")}</span>
-							<Button
-								type="button"
-								size="sm"
-								variant="outline"
-								onClick={handleTriageVisible}
-								disabled={triaging}
-								className="h-8 w-fit text-xs"
-							>
-								{triaging ? (
-									<Loader2 className="size-3.5 animate-spin" />
+						<div className="rounded-3xl bg-card border border-border p-2 shadow-[0_8px_32px_-20px_rgba(19,20,23,0.3)] flex flex-col sm:flex-row sm:items-center gap-2">
+							<div className="relative flex-1 min-w-0">
+								{loading ? (
+									<Loader2 className="size-5 text-muted-foreground absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none animate-spin" aria-hidden="true" />
 								) : (
-									<Sparkles className="size-3.5" />
+									<Search className="size-5 text-muted-foreground absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none" aria-hidden="true" />
 								)}
-								<span>{t("discover.sortVisible")}</span>
-							</Button>
-						</AlertDescription>
-					</Alert>
-				)}
+								<label htmlFor="discover-search" className="sr-only">{t("discover.searchPlaceholder")}</label>
+								<Input
+									id="discover-search"
+									name="search"
+									type="search"
+									autoComplete="off"
+									spellCheck={false}
+									value={searchInput}
+									onChange={(e) => setSearchInput(e.target.value)}
+									placeholder={t("discover.searchPlaceholder")}
+									className="pl-12 h-12 border-0 bg-transparent shadow-none text-[15px] focus-visible:ring-0"
+								/>
+							</div>
+							<div aria-hidden="true" className="hidden sm:block w-px self-stretch my-2 bg-border" />
+							<div className="relative sm:w-52">
+								<MapPin className="size-5 text-muted-foreground absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none" aria-hidden="true" />
+								<label htmlFor="discover-location" className="sr-only">{t("discover.locationPlaceholder")}</label>
+								<Input
+									id="discover-location"
+									name="location"
+									type="text"
+									autoComplete="address-level2"
+									inputMode="text"
+									value={locationInput}
+									onChange={(e) => setLocationInput(e.target.value)}
+									placeholder={t("discover.locationPlaceholder")}
+									className="pl-12 h-12 border-0 bg-transparent shadow-none text-[15px] focus-visible:ring-0"
+								/>
+							</div>
+						</div>
 
-				{(totalJobsInDb !== null ? totalJobsInDb > 0 : jobs.length > 0) && (
-					<div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-xl border border-neutral-200 bg-white px-3 py-2">
-						<label className="flex items-center gap-2 text-sm text-neutral-700">
-							<input
-								type="checkbox"
-								checked={
-									jobs.length > 0 &&
-									jobs.every((job) => selectedJobIds.includes(job.id))
-								}
-								onChange={toggleAllVisible}
-								disabled={jobs.length === 0}
-								className="size-4 rounded border-neutral-300 disabled:opacity-50"
-							/>
-							{t("discover.selectVisible")}
-						</label>
-
-						{(selectedJobIds.length > 0 || (globalStats && globalStats.skipped > 0)) && (
-							<div className="flex flex-wrap items-center gap-3">
-								{globalStats && globalStats.skipped > 0 && (
-									<Button
-										type="button"
-										variant="outline"
-										size="sm"
-										onClick={handleDeleteSkipped}
-										disabled={bulkDeleting}
-										className="text-xs h-8"
-									>
-										{bulkDeleting ? (
-											<Loader2 className="size-3.5 animate-spin" />
-										) : (
-											<Trash2 className="size-3.5" />
-										)}
-										<span>
-											{t("discover.deleteSkipped", {
-												count: globalStats.skipped,
-											})}
+						{triageCounts.UNSCORED > 0 && profileReady && (
+							<div className="rounded-3xl bg-primary text-primary-foreground p-5 sm:p-6 flex flex-col sm:flex-row sm:items-center gap-4">
+								<div className="flex-1 min-w-0">
+									<p className="font-bold tracking-tight text-lg">
+										{t("discover.hero.review", { count: triageCounts.UNSCORED })}
+									</p>
+									<p className="mt-0.5 text-sm opacity-70">
+										{t("discover.unscoredBacklogDescription")}
+									</p>
+								</div>
+								<Button
+									type="button"
+									variant="secondary"
+									size="lg"
+									onClick={handleTriageVisible}
+									disabled={triaging}
+									className="shrink-0"
+								>
+									{triaging ? (
+										<Loader2 className="size-4 animate-spin" aria-hidden="true" />
+									) : (
+										<Sparkles className="size-4" aria-hidden="true" />
+									)}
+									{t("discover.sortVisible")}
+									{triageProgress && (
+										<span className="tabular-nums">
+											{triageProgress.done}/{triageProgress.total}
 										</span>
-									</Button>
-								)}
-								{selectedJobIds.length > 0 && (
-									<>
-										<span className="text-sm text-neutral-500">
-											{t("discover.selected", { count: selectedJobIds.length })}
-										</span>
-										<Button
-											type="button"
-											variant="destructive"
-											size="sm"
-											onClick={handleBulkDelete}
-											disabled={bulkDeleting}
-											className="text-xs h-8"
-										>
-											{bulkDeleting ? (
-												<Loader2 className="size-3.5 animate-spin" />
-											) : (
-												<Trash2 className="size-3.5" />
-											)}
-											<span>{t("discover.deleteSelected")}</span>
-										</Button>
-									</>
-								)}
+									)}
+								</Button>
 							</div>
 						)}
-					</div>
-				)}
 
-				{/* Jobs List */}
-				{loading && jobs.length === 0 ? (
-					<div
-						className="rounded-2xl border border-neutral-200 bg-white p-4 flex flex-col gap-5"
-						aria-label={t("discover.loading")}
-					>
-						{[0, 1, 2].map((i) => (
-							<div key={i} className="flex items-center gap-4">
-								<Skeleton className="size-11 shrink-0 rounded-full" />
-								<div className="flex flex-1 flex-col gap-2">
-									<Skeleton className="h-4 w-2/3" />
-									<Skeleton className="h-3 w-1/3" />
+						<div className="flex flex-col gap-4">
+							<div className="flex items-center justify-between gap-3">
+								<Tabs
+									value={triageFilter}
+									onValueChange={(value) => setTriageFilter(value as TriageFilter)}
+					className="min-w-0 max-w-full"
+				>
+					<TabsList role="group" aria-label="Filter roles" className="h-auto min-h-9 max-w-full flex-wrap gap-0.5 sm:h-9 sm:flex-nowrap">
+										{pills.map((pill) => {
+											const count = pill.id === "all" ? triageCounts.all : triageCounts[pill.id];
+											return (
+												<TabsTrigger key={pill.id} value={pill.id} className="gap-1.5 px-3 tabular-nums">
+													{pill.label}
+													<span className="text-muted-foreground/70">{count}</span>
+												</TabsTrigger>
+											);
+										})}
+									</TabsList>
+								</Tabs>
+								<div className="flex shrink-0 items-center gap-1">
+									{triageFilter === "SKIP" && globalStats && globalStats.skipped > 0 && (
+										<button
+											type="button"
+											onClick={handleDeleteSkipped}
+											disabled={bulkDeleting}
+											title={t("discover.deleteSkipped", { count: globalStats.skipped })}
+											className="inline-flex items-center gap-1.5 h-9 px-3 rounded-full text-[13px] font-medium text-muted-foreground hover:text-destructive touch-manipulation motion-safe:transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:opacity-50"
+										>
+											{bulkDeleting ? (
+												<Loader2 className="size-4 animate-spin" aria-hidden="true" />
+											) : (
+												<Trash2 className="size-4" aria-hidden="true" />
+											)}
+											<span className="hidden lg:inline tabular-nums">
+												{t("discover.deleteSkipped", { count: globalStats.skipped })}
+											</span>
+										</button>
+									)}
+									<div className="hidden sm:block">
+										<SearchInsights refreshKey={searchInsightsRefresh} />
+									</div>
 								</div>
 							</div>
-						))}
-					</div>
-				) : jobs.length === 0 ? (
-					<Empty>
-						<EmptyHeader>
-							<EmptyMedia variant="icon">
-								<Briefcase />
-							</EmptyMedia>
-							<EmptyTitle>{t("discover.emptyTitle")}</EmptyTitle>
-							<EmptyDescription>
-								{t("discover.emptyDescription")}
-							</EmptyDescription>
-						</EmptyHeader>
-						<EmptyContent>
-							<Button onClick={() => setIsSearchModalOpen(true)} size="sm">
-								{t("discover.findRoles")}
-							</Button>
-						</EmptyContent>
-					</Empty>
-				) : (
-					<div className={`flex flex-col gap-4 transition-opacity duration-200 ${loading ? 'opacity-50 pointer-events-none' : ''}`}>
-						{jobs.map((job) => (
-							<JobCard
-								key={job.id}
-								job={job}
-								selected={selectedJobIds.includes(job.id)}
-								onSelectToggle={toggleJobSelection}
-								onSaveToggle={() => fetchJobs()}
-								onDelete={(jobId) => {
-									setJobs((current) =>
-										current.filter((item) => item.id !== jobId),
-									);
-									setSelectedJobIds((current) =>
-										current.filter((id) => id !== jobId),
-									);
-								}}
-							/>
-						))}
-					</div>
+
+							<div className="flex items-center justify-between gap-3">
+								<div className="flex items-center gap-2 min-w-0">
+									<h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground shrink-0">
+										{t("discover.caption.top")}
+									</h2>
+									<button
+										type="button"
+										onClick={() => (selecting ? exitSelecting() : setSelecting(true))}
+										aria-pressed={selecting}
+										className={`inline-flex shrink-0 items-center gap-1.5 h-8 px-3 rounded-full text-[13px] font-medium touch-manipulation motion-safe:transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none ${
+											selecting
+												? "bg-primary text-primary-foreground font-semibold"
+												: "border border-border bg-card text-foreground hover:bg-muted"
+										}`}
+									>
+										<CheckSquare className="size-3.5" aria-hidden="true" />
+										{selecting ? t("common.done") : t("discover.select")}
+									</button>
+								</div>
+								<Tabs
+									value={activeTab}
+									onValueChange={(value) =>
+										setActiveTab(value as "best" | "newest" | "saved")
+									}
+								>
+									<TabsList>
+										<TabsTrigger value="best">
+											{t("discover.tabs.recommended")}
+										</TabsTrigger>
+										<TabsTrigger value="newest">
+											{t("discover.tabs.latest")}
+										</TabsTrigger>
+										<TabsTrigger value="saved">{t("discover.tabs.saved")}</TabsTrigger>
+									</TabsList>
+								</Tabs>
+							</div>
+						</div>
+
+						{selecting && (
+							<p className="text-[13px] text-muted-foreground">{t("discover.selectHint")}</p>
+						)}
+
+						{triageError && (
+							<Alert variant="destructive" role="alert">
+								<TriangleAlert aria-hidden="true" />
+								<AlertDescription>{triageError}</AlertDescription>
+							</Alert>
+						)}
+
+						{bulkError && (
+							<Alert variant="destructive" role="alert">
+								<TriangleAlert aria-hidden="true" />
+								<AlertDescription>{bulkError}</AlertDescription>
+							</Alert>
+						)}
+
+						{matchingPaused && (
+							<Alert>
+								<TriangleAlert aria-hidden="true" />
+								<AlertDescription className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+									<span className="text-pretty">{t("discover.profileNeededDescription")}</span>
+									<Link
+										href="/setup"
+										className="inline-flex h-10 w-fit items-center justify-center rounded-2xl bg-primary px-4 text-sm font-semibold text-primary-foreground hover:opacity-90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none touch-manipulation"
+									>
+										{t("setup.firstRunAction")}
+									</Link>
+								</AlertDescription>
+							</Alert>
+						)}
+
+						{loading && jobs.length === 0 ? (
+							<div
+								className="flex flex-col gap-4"
+								role="status"
+								aria-label={t("discover.loading")}
+								aria-busy="true"
+							>
+								<span className="sr-only">{t("discover.loading")}</span>
+								{[0, 1, 2].map((i) => (
+									<div key={i} aria-hidden="true" className="rounded-3xl border border-border bg-card p-5 sm:p-6 flex items-center gap-4">
+										<Skeleton className="size-12 shrink-0 rounded-2xl" />
+										<div className="flex flex-1 flex-col gap-2">
+											<Skeleton className="h-4 w-2/3" />
+											<Skeleton className="h-3 w-1/3" />
+										</div>
+										<Skeleton className="size-13 shrink-0 rounded-full" />
+									</div>
+								))}
+							</div>
+						) : visibleJobs.length === 0 ? (
+							<Empty className="rounded-3xl border border-border bg-card py-12">
+								<EmptyHeader>
+									<EmptyMedia variant="icon">
+										<Briefcase aria-hidden="true" />
+									</EmptyMedia>
+									<EmptyTitle>{t("discover.filter.emptyTitle")}</EmptyTitle>
+									<EmptyDescription>
+										{t("discover.filter.emptyDesc")}
+									</EmptyDescription>
+								</EmptyHeader>
+								<EmptyContent>
+									<Button onClick={() => setTriageFilter("all")} variant="outline">
+										{t("discover.filter.clear")}
+									</Button>
+								</EmptyContent>
+							</Empty>
+						) : (
+							<>
+								<div aria-busy={loading} className={`flex flex-col gap-4 motion-safe:transition-opacity motion-safe:duration-150 ${loading ? 'opacity-60' : ''}`}>
+									{visibleJobs.map((job) => (
+										<JobCard
+											key={job.id}
+											job={job}
+											onSaveToggle={handleSaveToggle}
+											onDelete={handleDeleteJob}
+											onOpen={setDrawerJobId}
+											selected={selectedIds.includes(job.id)}
+											selectMode={selecting}
+											onSelectToggle={toggleSelect}
+										/>
+									))}
+								</div>
+							</>
+						)}
+					</>
 				)}
 			</main>
 
@@ -649,11 +831,92 @@ export default function JobsPage() {
 					setLocationQuery(nextState.locationQuery);
 					setRemoteFilter(nextState.remoteFilter);
 					setActiveTab(nextState.activeTab);
-					setSelectedJobIds([]);
+					setTriageFilter("all");
 					fetchJobs(nextState);
 					setSearchInsightsRefresh((value) => value + 1);
 				}}
 			/>
+
+			<JobDrawer
+				jobId={drawerJobId}
+				onClose={() => setDrawerJobId(null)}
+				onChanged={() => fetchJobs()}
+				onDeleted={(jobId) => handleDeleteJob(jobId)}
+			/>
+
+			<AddJobDialog
+				open={isAddJobOpen}
+				onClose={() => setIsAddJobOpen(false)}
+				onAdded={(jobId) => {
+					setIsAddJobOpen(false);
+					setTriageFilter("all");
+					fetchJobs();
+					if (jobId) setDrawerJobId(jobId);
+				}}
+			/>
+
+			{selecting && (
+				<div className="fixed inset-x-3 bottom-20 md:inset-x-auto md:bottom-6 md:left-1/2 md:-translate-x-1/2 z-40 motion-safe:animate-in motion-safe:fade-in-0 motion-safe:slide-in-from-bottom-2 motion-safe:duration-150">
+					<div
+						role="toolbar"
+						aria-label={t("discover.selected", { count: selectedIds.length })}
+						className="flex w-full md:w-max items-center gap-1.5 rounded-2xl border border-border bg-primary text-primary-foreground pl-3 sm:pl-4 pr-2 py-2 shadow-[0_16px_48px_-16px_rgba(19,20,23,0.5)]"
+					>
+						<span aria-live="polite" className="text-sm font-semibold tabular-nums whitespace-nowrap">
+							{t("discover.selected", { count: selectedIds.length })}
+						</span>
+						<button
+							type="button"
+							onClick={() => {
+								const visibleIds = visibleJobs.map((job) => job.id);
+								const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.includes(id));
+								setSelectedIds(allSelected ? [] : visibleIds);
+							}}
+							className="h-9 shrink-0 whitespace-nowrap px-3 rounded-full text-[13px] font-medium opacity-80 hover:opacity-100 hover:bg-white/10 dark:hover:bg-black/10 touch-manipulation motion-safe:transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+						>
+							{visibleJobs.length > 0 && visibleJobs.every((job) => selectedIds.includes(job.id))
+								? t("discover.clearSelection")
+								: t("discover.selectAll")}
+						</button>
+						<button
+							type="button"
+							onClick={handleSaveSelected}
+							disabled={saveableSelectedIds.length === 0 || bulkSaving || bulkDeleting}
+							aria-label={t("discover.saveSelected")}
+							title={saveableSelectedIds.length === 0 ? t("discover.saveSelectedNone") : undefined}
+							className="ml-auto inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 h-9 px-2.5 sm:px-3.5 rounded-full text-[13px] font-semibold bg-primary-foreground/15 hover:bg-primary-foreground/25 disabled:opacity-50 touch-manipulation motion-safe:transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+						>
+							{bulkSaving ? (
+								<Loader2 className="size-4 animate-spin" aria-hidden="true" />
+							) : (<Bookmark className="size-4" aria-hidden="true" />
+															)}
+													<span className="hidden sm:inline">{t("discover.saveSelected")}</span>
+						</button>
+						<button
+							type="button"
+							onClick={handleDeleteSelected}
+							aria-label={t("discover.deleteSelected")}
+							disabled={selectedIds.length === 0 || bulkDeleting || bulkSaving}
+							className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 h-9 px-2.5 sm:px-3.5 rounded-full text-[13px] font-semibold bg-destructive text-white hover:opacity-90 disabled:opacity-50 touch-manipulation motion-safe:transition-opacity focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+						>
+							{bulkDeleting ? (
+								<Loader2 className="size-4 animate-spin" aria-hidden="true" />
+							) : (<Trash2 className="size-4" aria-hidden="true" />
+															)}
+													<span className="hidden sm:inline">{t("discover.deleteSelected")}</span>
+						</button>
+						<button
+							type="button"
+							onClick={exitSelecting}
+							aria-label={t("common.cancel")}
+							title={t("common.cancel")}
+							className="flex size-9 items-center justify-center rounded-full opacity-80 hover:opacity-100 hover:bg-white/10 dark:hover:bg-black/10 touch-manipulation motion-safe:transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+						>
+							<X className="size-4" aria-hidden="true" />
+						</button>
+					</div>
+				</div>
+			)}
 		</div>
 	);
 }
