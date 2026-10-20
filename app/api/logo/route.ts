@@ -56,7 +56,7 @@ export async function GET(req: Request) {
 
     if (name.length >= 2) {
       return NextResponse.redirect(
-        `https://img.logo.dev/name/${encodeURIComponent(name)}?token=${encodeURIComponent(token)}&size=${size}&format=png&retina=true&fallback=monogram`
+        `https://img.logo.dev/name/${encodeURIComponent(name)}?token=${encodeURIComponent(token)}&size=${size}&format=png&retina=true&fallback=404`
       );
     }
 

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { getAIProvider } from '@/lib/ai/openai-compatible';
+import { extractContactEmail } from '@/lib/jobs/normalize';
 
 const MAX_INPUT_CHARS = 30000;
 const REMOTE_TYPES = ['remote', 'hybrid', 'onsite', 'unknown'] as const;
@@ -31,8 +32,15 @@ const ExtractedJobSchema = z.object({
   salaryMax: z.preprocess(cleanNumber, z.number().nullable()),
   salaryCurrency: z.preprocess((value) => String(value ?? '').trim().toUpperCase().slice(0, 3), z.string()),
   url: z.preprocess(cleanText(2000), z.string()),
+  contactEmail: z.preprocess(cleanText(320), z.string()),
   description: z.preprocess(cleanText(20000), z.string()),
 });
+
+/** First http(s) link in the pasted text, used when the model leaves `url` empty. */
+function findPostingUrl(text: string): string {
+  const match = text.match(/https?:\/\/[^\s<>"')\]]+/i);
+  return match ? match[0].replace(/[.,;:!?]+$/, '').slice(0, 2000) : '';
+}
 
 /** POST /api/jobs/extract — read pasted posting text and return structured job fields. */
 export async function POST(req: Request) {
@@ -56,6 +64,7 @@ Rules:
 - Use null for salaries that are not stated. Use plain numbers (no separators or currency symbols).
 - remoteType is one of "remote", "hybrid", "onsite", or "unknown".
 - url is the application or posting link if the text contains one, otherwise an empty string.
+- contactEmail is the recruiter or application email address if the text contains one, otherwise an empty string.
 - description is the full job description (responsibilities, requirements, benefits), cleaned of navigation and boilerplate. Keep the original language.
 
 Job posting:
@@ -64,7 +73,7 @@ ${text}
 """
 
 Return exactly this shape:
-{"title":"","company":"","location":"","remoteType":"unknown","employmentType":"","salaryMin":null,"salaryMax":null,"salaryCurrency":"","url":"","description":""}`;
+{"title":"","company":"","location":"","remoteType":"unknown","employmentType":"","salaryMin":null,"salaryMax":null,"salaryCurrency":"","url":"","contactEmail":"","description":""}`;
 
   try {
     const ai = await getAIProvider();
@@ -74,7 +83,14 @@ Return exactly this shape:
       systemPrompt:
         'You extract job postings into structured data. Output only a complete valid JSON object matching the schema. No markdown and no prose.',
     });
-    return NextResponse.json({ success: true, job });
+    return NextResponse.json({
+      success: true,
+      job: {
+        ...job,
+        url: job.url || findPostingUrl(text),
+        contactEmail: job.contactEmail || extractContactEmail(text) || '',
+      },
+    });
   } catch (error) {
     return NextResponse.json(
       { error: (error as Error).message || 'The AI could not read this posting' },

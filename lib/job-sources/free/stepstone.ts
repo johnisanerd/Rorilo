@@ -126,6 +126,12 @@ function locationFromJobPosting(loc: unknown): string {
   return '';
 }
 
+function parseDatePosted(value: string | undefined): Date | undefined {
+  if (!value) return undefined;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
 function employmentFrom(value: unknown): string | undefined {
   const raw = Array.isArray(value) ? value[0] : value;
   const t = String(raw || '').toUpperCase();
@@ -163,7 +169,7 @@ export function normalizeStepstoneDetail(
     languageRequirements: [],
     applicationUrl: item.detailUrl,
     originalUrl: item.detailUrl,
-    datePosted: posting?.datePosted ? new Date(posting.datePosted) : undefined,
+    datePosted: parseDatePosted(posting?.datePosted),
     rawData: { detailUrl: item.detailUrl, timeago: item.timeago },
   };
 }

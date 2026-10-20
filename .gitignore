@@ -26,11 +26,14 @@
 
 # local agent/editor metadata
 /.agents/
+/.claude/
 /.codex/
 /CLAUDE.md
 /skills-lock.json
 
 # debug
+/screenshots/
+/*.png
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

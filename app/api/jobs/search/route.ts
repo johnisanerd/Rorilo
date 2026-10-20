@@ -224,6 +224,58 @@ async function saveDiscoveredJob(
   return { created: true, jobId: createdJob.id, skippedDeleted: false };
 }
 
+type SourceFetcher = {
+  label: string;
+  paramsJson: string;
+  fetchJobs: (fetchLimit: number) => Promise<JobSourceSearchResult>;
+};
+
+type FetchOutcome =
+  | { ok: true; fetcher: SourceFetcher; searchRunId: string; result: JobSourceSearchResult }
+  | { ok: false; fetcher: SourceFetcher; searchRunId: string | null; error: string };
+
+/** Hard cap so one hung source cannot hold the whole search response open. */
+const SOURCE_TIMEOUT_MS = 120_000;
+
+function withSourceTimeout<T>(work: Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} took too long to respond. Please try again.`)),
+      SOURCE_TIMEOUT_MS,
+    );
+  });
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function recordFailedRun(
+  searchRunId: string | null,
+  sourceLabel: string,
+  paramsJson: string,
+  errorMessage: string
+) {
+  try {
+    if (searchRunId) {
+      await prisma.searchRun.update({
+        where: { id: searchRunId },
+        data: { completedAt: new Date(), status: 'FAILED', error: errorMessage },
+      });
+    } else {
+      await prisma.searchRun.create({
+        data: {
+          source: sourceLabel,
+          searchParameters: paramsJson,
+          completedAt: new Date(),
+          status: 'FAILED',
+          error: errorMessage,
+        },
+      });
+    }
+  } catch (recordError) {
+    console.error('Could not record failed search run:', recordError);
+  }
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => ({})) as Record<string, unknown>;
@@ -288,11 +340,6 @@ export async function POST(req: Request) {
     const failedSources: SourceFailure[] = [];
     const jobIdsForTriage: string[] = [];
 
-    type SourceFetcher = {
-      label: string;
-      paramsJson: string;
-      fetchJobs: (fetchLimit: number) => Promise<JobSourceSearchResult>;
-    };
     const fetchers: SourceFetcher[] = resolvedSources.map((source) => ({
       label: source.displayName,
       paramsJson: JSON.stringify({
@@ -334,13 +381,14 @@ export async function POST(req: Request) {
       });
     }
 
-    for (const fetcher of fetchers) {
+    // Fetch every source concurrently so one slow or broken site cannot hold up
+    // the others. Each fetch catches its own errors and never rejects.
+    const fetchForRun = async (fetcher: SourceFetcher): Promise<FetchOutcome> => {
       let searchRunId: string | null = null;
-      const sourceLabel = fetcher.label;
       try {
         const previousRuns = await prisma.searchRun.count({
           where: {
-            source: sourceLabel,
+            source: fetcher.label,
             searchParameters: fetcher.paramsJson,
             status: 'COMPLETED',
           },
@@ -349,14 +397,35 @@ export async function POST(req: Request) {
 
         const run = await prisma.searchRun.create({
           data: {
-            source: sourceLabel,
+            source: fetcher.label,
             searchParameters: fetcher.paramsJson,
             status: 'RUNNING',
           },
         });
         searchRunId = run.id;
 
-        const searchResult = await fetcher.fetchJobs(fetchLimit);
+        const result = await withSourceTimeout(fetcher.fetchJobs(fetchLimit), fetcher.label);
+        return { ok: true, fetcher, searchRunId: run.id, result };
+      } catch (error) {
+        return {
+          ok: false,
+          fetcher,
+          searchRunId,
+          error: (error as Error).message || 'Search execution failed',
+        };
+      }
+    };
+
+    const outcomes = await Promise.all(fetchers.map(fetchForRun));
+
+    // Saving stays sequential so duplicate detection sees earlier inserts.
+    for (const outcome of outcomes) {
+      const sourceLabel = outcome.fetcher.label;
+      try {
+        if (!outcome.ok) {
+          throw new Error(outcome.error);
+        }
+        const searchResult = outcome.result;
 
         let newJobsCount = 0;
         let duplicateJobsCount = 0;
@@ -367,7 +436,14 @@ export async function POST(req: Request) {
 
         for (const jobItem of searchResult.jobs) {
           inspectedCount++;
-          const saved = await saveDiscoveredJob(jobItem, sourceLabel, searchParams.country || 'DE', profile, preferences, shouldScore);
+          let saved: Awaited<ReturnType<typeof saveDiscoveredJob>>;
+          try {
+            saved = await saveDiscoveredJob(jobItem, sourceLabel, searchParams.country || 'DE', profile, preferences, shouldScore);
+          } catch (jobError) {
+            // One malformed posting must not discard the rest of this source.
+            console.error(`Skipped a job from ${sourceLabel}:`, jobError);
+            continue;
+          }
           if (saved.skippedExcluded) {
             skippedExcludedCount++;
             continue;
@@ -390,7 +466,7 @@ export async function POST(req: Request) {
         }
 
         await prisma.searchRun.update({
-          where: { id: searchRunId },
+          where: { id: outcome.searchRunId },
           data: {
             completedAt: new Date(),
             jobsDiscovered: Math.max(searchResult.totalDiscovered, inspectedCount),
@@ -412,27 +488,7 @@ export async function POST(req: Request) {
       } catch (sourceError) {
         const errorMessage = (sourceError as Error).message || 'Search execution failed';
         failedSources.push({ source: sourceLabel, error: errorMessage });
-
-        if (searchRunId) {
-          await prisma.searchRun.update({
-            where: { id: searchRunId },
-            data: {
-              completedAt: new Date(),
-              status: 'FAILED',
-              error: errorMessage,
-            },
-          });
-        } else {
-          await prisma.searchRun.create({
-            data: {
-              source: sourceLabel,
-              searchParameters: fetcher.paramsJson,
-              completedAt: new Date(),
-              status: 'FAILED',
-              error: errorMessage,
-            },
-          });
-        }
+        await recordFailedRun(outcome.searchRunId, sourceLabel, outcome.fetcher.paramsJson, errorMessage);
       }
     }
 

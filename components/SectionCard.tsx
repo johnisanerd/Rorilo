@@ -25,7 +25,7 @@ export function SectionCard({
         className,
       )}
     >
-      <header className="flex items-start justify-between gap-3 px-5 sm:px-6 pt-5 pb-4 border-b border-border/70">
+      <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between px-5 sm:px-6 pt-5 pb-4 border-b border-border/70">
         <div className="flex items-start gap-3 min-w-0">
           {icon && (
             <span aria-hidden="true" className="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-muted text-foreground">
@@ -43,7 +43,7 @@ export function SectionCard({
             )}
           </div>
         </div>
-        {action && <div className="shrink-0">{action}</div>}
+        {action && <div className="shrink-0 self-start">{action}</div>}
       </header>
       <div className="px-5 sm:px-6 py-5 sm:py-6">{children}</div>
     </section>

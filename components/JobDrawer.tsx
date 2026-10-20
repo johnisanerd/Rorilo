@@ -286,17 +286,19 @@ export function JobDrawer({
 					</div>
 				) : (
 					<>
-						<SheetHeader className="p-5 sm:p-6 pb-4 border-b border-border text-left">
-							<div className="flex items-start gap-4 pr-10">
+						{/* Below sm the header and body scroll together; from sm up the header stays fixed. */}
+						<div className="flex min-h-0 flex-1 flex-col overflow-y-auto sm:contents">
+						<SheetHeader className="p-4 pb-3 sm:p-6 sm:pb-4 border-b border-border text-left">
+							<div className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-3 pr-10 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:gap-4">
 								<CompanyLogo
 									company={job.company}
 									website={job.companyWebsite}
 									directLogoUrl={job.companyLogo}
-									size={52}
+									size={44}
 									className="rounded-2xl"
 								/>
 								<div className="min-w-0 flex-1">
-									<SheetTitle className="text-xl font-bold tracking-tight text-balance leading-tight">
+									<SheetTitle className="text-lg sm:text-xl font-bold tracking-tight text-balance leading-tight">
 										{job.title}
 									</SheetTitle>
 									<SheetDescription className="mt-1 flex flex-wrap items-center gap-x-1.5 text-sm">
@@ -329,15 +331,15 @@ export function JobDrawer({
 								{hasScore && (
 									<ScoreRing
 										score={score}
-										size={56}
+										size={48}
 										calibrated={calibrated}
-										className="shrink-0"
+										className="col-span-2 justify-self-start sm:col-span-1 sm:col-start-3 sm:row-start-1 sm:justify-self-end"
 									/>
 								)}
 							</div>
 						</SheetHeader>
 
-						<div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-5 sm:px-6 lg:px-9 py-5 flex flex-col gap-6">
+						<div className="flex-1 min-h-0 sm:overflow-y-auto overscroll-contain px-5 sm:px-6 lg:px-9 py-5 flex flex-col gap-6">
 							{(triageLabel || job.match?.triageReason) && (
 								<div className="rounded-2xl bg-muted/60 px-4 py-3">
 									{triageLabel && (
@@ -445,6 +447,7 @@ export function JobDrawer({
 										</span>
 									)}
 							</section>
+						</div>
 						</div>
 
 						<SheetFooter className="px-4 py-2 sm:px-6 border-t border-border bg-popover flex-col gap-1.5">

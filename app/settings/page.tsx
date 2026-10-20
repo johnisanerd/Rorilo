@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Loader2, Plus, Trash2, Mail, ChevronDown, ChevronUp, CheckCircle2, ExternalLink, X, Info, Download, Upload, Database, Cpu, Cloud, Globe, Image as ImageIcon } from 'lucide-react';
+import { Loader2, Plus, Trash2, Mail, ChevronDown, ChevronUp, CheckCircle2, ExternalLink, X, Info, Download, Upload, Database, Cpu, Cloud, Globe, Image as ImageIcon, Palette } from 'lucide-react';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -11,6 +11,8 @@ import { SectionCard } from '@/components/SectionCard';
 import { SecretInput } from '@/components/SecretInput';
 import { ModelPicker } from '@/components/ModelPicker';
 import { CompanyLogo } from '@/components/CompanyLogo';
+import { LanguageToggle } from '@/components/LanguageToggle';
+import { ThemeToggle } from '@/components/ThemeToggle';
 import { orderFreeSources } from '@/lib/job-sources/free';
 import { KNOWN_JOB_SOURCES, orderApifyPicker } from '@/lib/job-sources/sources';
 import { sourceCoverageGroupTitle, sourceCoverageLabel, sourceCoveragePriority } from '@/lib/job-sources/countries';
@@ -617,6 +619,14 @@ export default function SettingsPage() {
       />
 
       <main className="px-4 sm:px-6 lg:px-8 py-6 md:py-8 max-w-3xl w-full mx-auto space-y-6 motion-safe:animate-in motion-safe:fade-in-0 motion-safe:slide-in-from-bottom-1 motion-safe:duration-150">
+        {/* 0. Appearance */}
+        <SectionCard icon={<Palette className="size-[18px]" aria-hidden="true" />} title={t('settings.appearanceTitle')} description={t('settings.appearanceDescription')}>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <LanguageToggle />
+            <ThemeToggle />
+          </div>
+        </SectionCard>
+
         {/* 1. AI Provider */}
         <SectionCard icon={<Cpu className="size-[18px]" aria-hidden="true" />} title={t('settings.aiTitle')} description={t('settings.aiDescription')}>
           <div className="flex flex-col gap-4">
@@ -884,7 +894,6 @@ export default function SettingsPage() {
           </form>
           </div>
         </SectionCard>
-
 
         <SectionCard icon={<Database className="size-[18px]" aria-hidden="true" />} title={t('settings.backupTitle')} description={t('settings.backupDescription')}>
           <div className="flex flex-col gap-4">

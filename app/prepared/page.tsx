@@ -100,11 +100,17 @@ export default function PreparedJobsPage() {
       );
 
       setPreparedJobs(prepared);
-      if (prepared.length > 0 && (!selectedJobId || !prepared.some((item: any) => item.job.id === selectedJobId))) {
-        setSelectedJobId(prepared[0].job.id);
-      } else if (prepared.length === 0) {
+      // On phones the list is the primary view, so only auto-open a draft on desktop widths.
+      const isDesktop = window.matchMedia('(min-width: 768px)').matches;
+      if (prepared.length === 0) {
         setSelectedJobId(null);
         setSelectedJob(null);
+      } else if (selectedJobId && prepared.some((item: any) => item.job.id === selectedJobId)) {
+        // Keep the current selection.
+      } else if (isDesktop) {
+        setSelectedJobId(prepared[0].job.id);
+      } else {
+        setSelectedJobId(null);
       }
     } catch (err) {
       console.error(err);
@@ -598,7 +604,7 @@ export default function PreparedJobsPage() {
               {/* Right Panel Header */}
               <div className="px-3 sm:px-6 pt-3 sm:pt-4">
               <div className="rounded-3xl border border-border bg-card/95 backdrop-blur-md px-4 sm:px-5 py-4 shadow-[0_12px_40px_-24px_rgba(19,20,23,0.3)] flex flex-col gap-3">
-                <div className="flex items-start justify-between gap-3">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div className="min-w-0 flex-1">
                   <button
                     type="button"

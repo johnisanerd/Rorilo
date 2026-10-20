@@ -3,6 +3,7 @@ import { prisma } from '@/lib/prisma';
 import { generateApplicationMaterials } from '@/lib/application/generator';
 import { getAISettingsRow } from '@/lib/ai/settings-store';
 import { getAiProviderIssue, getDraftReadinessIssues } from '@/lib/setup/readiness';
+import { extractContactEmail } from '@/lib/jobs/normalize';
 
 export async function POST(
   _req: Request,
@@ -10,14 +11,28 @@ export async function POST(
 ) {
   try {
     const { id } = await params;
-    const job = await prisma.job.findUnique({
+    const storedJob = await prisma.job.findUnique({
       where: { id },
       include: { analysis: true },
     });
 
-    if (!job) {
+    if (!storedJob) {
       return NextResponse.json({ error: 'Job not found' }, { status: 404 });
     }
+
+    // Older jobs may only have the recruiter email in the AI analysis or description.
+    const contactEmail =
+      storedJob.contactEmail ||
+      extractContactEmail(storedJob.analysis?.contactEmail ?? '') ||
+      extractContactEmail(storedJob.description);
+    const job =
+      contactEmail && contactEmail !== storedJob.contactEmail
+        ? await prisma.job.update({
+            where: { id: storedJob.id },
+            data: { contactEmail },
+            include: { analysis: true },
+          })
+        : storedJob;
 
     const [profile, preferences, activeCv, aiSettings] = await Promise.all([
       prisma.userProfile.findFirst({ where: { id: 'default' } }),

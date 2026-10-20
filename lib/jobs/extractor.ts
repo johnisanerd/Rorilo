@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { getAIProvider } from '../ai/openai-compatible';
 import { Job, JobAnalysis } from '@prisma/client';
 import { prisma } from '../prisma';
+import { extractContactEmail } from './normalize';
 
 export const JobAnalysisSchema = z.object({
   requiredSkills: z.array(z.string()).default([]),
@@ -109,6 +110,12 @@ Extract:
       modelUsed: 'ai-or-fallback',
     },
   });
+
+  // Keep the recruiter email on the job too, so drafts and the prepare step can use it.
+  const recruiterEmail = extractContactEmail(extractedData.contactEmail ?? '');
+  if (!job.contactEmail && recruiterEmail) {
+    await prisma.job.update({ where: { id: job.id }, data: { contactEmail: recruiterEmail } });
+  }
 
   return analysis;
 }

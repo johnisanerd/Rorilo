@@ -71,7 +71,10 @@ export interface CoverLetterPdfData {
  * with wrong widths (spaced-out, overflowing lines) instead.
  */
 export function sanitizePdfText(raw: string | undefined | null): string {
-  return cleanInvisibleText(raw);
+  // jsPDF's standard fonts (WinAnsi) have no glyph for the non-breaking or
+  // Unicode hyphens LLM output often uses (U+2010, U+2011, U+2212). Those
+  // render as spaced-out letters, so fold them to a plain ASCII hyphen.
+  return cleanInvisibleText(raw).replace(/[\u2010\u2011\u2212]/g, "-");
 }
 
 function sanitizeContent(raw: string) {
@@ -375,14 +378,14 @@ function renderTemplateEditorial(data: CoverLetterPdfData): jsPDF {
   doc.text(nameLines, margin, 54);
   let y = 54 + (nameLines.length - 1) * 28 + 20;
 
-  // Spaced Uppercase Subtitle
+  // Subtitle: wrapped as normal text (letters must stay intact, e.g. hyphenated words)
   if (data.candidateTitle) {
     doc.setFont("helvetica", "bold");
     doc.setFontSize(8.5);
     doc.setTextColor(71, 85, 105);
-    const spaced = data.candidateTitle.toUpperCase().split("").join(" ");
-    doc.text(spaced.slice(0, 50), margin, y);
-    y += 18;
+    const titleLines = doc.splitTextToSize(data.candidateTitle, cw);
+    doc.text(titleLines, margin, y);
+    y += 18 + (titleLines.length - 1) * 11;
   }
 
   // Triple-Column Boxed Contact Bar (framed by top & bottom lines)
@@ -410,8 +413,7 @@ function renderTemplateEditorial(data: CoverLetterPdfData): jsPDF {
   doc.setFontSize(9);
   doc.setTextColor(15, 23, 42);
   const toHeader = isGerman ? "AN DIE PERSONALABTEILUNG" : "TO HIRING MANAGER";
-  const spacedTo = toHeader.split("").join(" ");
-  doc.text(spacedTo, margin, y);
+  doc.text(toHeader, margin, y);
   y += 14;
 
   doc.setFont("times", "normal");

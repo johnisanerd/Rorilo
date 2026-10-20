@@ -7,8 +7,10 @@ import { attachSourceSummary } from '@/lib/jobs/source-history';
 import { hasMatchProfile } from '@/lib/setup/readiness';
 import { computeJobHash } from '@/lib/jobs/deduplicate';
 import { validateManualDescription } from '@/lib/jobs/manual-description';
+import { extractContactEmail } from '@/lib/jobs/normalize';
 
 const REMOTE_TYPES = new Set(['remote', 'hybrid', 'onsite', 'unknown']);
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function cleanStr(value: unknown, max: number): string {
   return typeof value === 'string' ? value.trim().slice(0, max) : '';
@@ -75,6 +77,12 @@ export async function POST(req: Request) {
       );
     }
 
+    const contactEmailRaw = cleanStr(body.contactEmail, 320);
+    const contactEmail =
+      (EMAIL_PATTERN.test(contactEmailRaw) ? contactEmailRaw : null) ??
+      extractContactEmail(descValidation.value) ??
+      null;
+
     const url = cleanUrl(body.url ?? body.applicationUrl);
     if (body.url !== undefined && body.url !== null && String(body.url).trim() !== '' && !url) {
       return NextResponse.json({ error: 'Posting URL does not look valid' }, { status: 400 });
@@ -110,6 +118,7 @@ export async function POST(req: Request) {
         description: descValidation.value,
         applicationUrl: url,
         originalUrl: url,
+        contactEmail,
       },
       select: { id: true },
     });

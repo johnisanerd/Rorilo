@@ -263,7 +263,7 @@ export default function ApplicationsPage() {
         {loading ? (
           <div className="flex flex-col md:flex-row gap-4 items-stretch min-w-[950px] pb-10" aria-label={t('tracker.loading')}>
             {[0, 1, 2, 3].map((col) => (
-              <div key={col} className="bg-muted/40 border border-border rounded-2xl p-3 flex flex-col gap-2.5 flex-1">
+              <div key={col} className="bg-muted/40 border border-border rounded-2xl p-3 flex flex-col gap-2.5 flex-1 min-w-0">
                 <Skeleton className="h-4 w-24" />
                 <Skeleton className="h-24 w-full" />
                 <Skeleton className="h-24 w-full" />
@@ -309,7 +309,7 @@ export default function ApplicationsPage() {
                   }}
                   onDragLeave={() => setDropStatus((current) => current === col.id ? null : current)}
                   onDrop={() => handleDropOnStatus(col.id)}
-                  className={`bg-muted/40 border rounded-2xl p-3 flex flex-col min-h-[220px] flex-1 motion-safe:transition-colors motion-safe:duration-150 ${
+                  className={`bg-muted/40 border rounded-2xl p-3 flex flex-col min-h-[220px] flex-1 min-w-0 motion-safe:transition-colors motion-safe:duration-150 ${
                     dropStatus === col.id
                       ? 'border-primary/50 bg-primary/[0.05] ring-1 ring-primary/20'
                       : 'border-border'

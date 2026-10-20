@@ -10,6 +10,7 @@ import { SearchInsights } from "@/components/SearchInsights";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
 	Empty,
@@ -495,6 +496,8 @@ export default function JobsPage() {
 		}
 	};
 
+	const countForPill = (id: TriageFilter) => (id === "all" ? triageCounts.all : triageCounts[id]);
+
 	const pills: Array<{ id: TriageFilter; label: string }> = [
 		{ id: "all", label: t("discover.pills.all") },
 		{ id: "WORTH_APPLYING", label: t("jobcard.triageWorth") },
@@ -645,24 +648,45 @@ export default function JobsPage() {
 						)}
 
 						<div className="flex flex-col gap-4">
-							<div className="flex items-center justify-between gap-3">
+							<div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
 								<Tabs
 									value={triageFilter}
 									onValueChange={(value) => setTriageFilter(value as TriageFilter)}
-					className="min-w-0 max-w-full"
+					className="hidden min-w-0 w-full max-w-full flex-1 sm:flex sm:w-auto"
 				>
-					<TabsList role="group" aria-label="Filter roles" className="h-auto min-h-9 max-w-full flex-wrap gap-0.5 sm:h-9 sm:flex-nowrap">
+					<TabsList role="group" aria-label="Filter roles" className="w-fit group-data-horizontal/tabs:h-9">
 										{pills.map((pill) => {
 											const count = pill.id === "all" ? triageCounts.all : triageCounts[pill.id];
 											return (
-												<TabsTrigger key={pill.id} value={pill.id} className="gap-1.5 px-3 tabular-nums">
-													{pill.label}
+												<TabsTrigger key={pill.id} value={pill.id} className="shrink-0 gap-1.5 whitespace-nowrap px-3 tabular-nums">
+													{pill.label}{" "}
 													<span className="text-muted-foreground/70">{count}</span>
 												</TabsTrigger>
 											);
 										})}
 									</TabsList>
 								</Tabs>
+								<Select
+									value={triageFilter}
+									onValueChange={(value) => {
+										if (value) setTriageFilter(value as TriageFilter);
+									}}
+								>
+									<SelectTrigger aria-label="Filter roles" className="w-full data-[size=default]:h-9 sm:hidden">
+										<span className="truncate">
+											{pills.find((pill) => pill.id === triageFilter)?.label}{" "}
+											<span className="text-muted-foreground/70 tabular-nums">{countForPill(triageFilter)}</span>
+										</span>
+									</SelectTrigger>
+									<SelectContent>
+										{pills.map((pill) => (
+											<SelectItem key={pill.id} value={pill.id}>
+												{pill.label}{" "}
+												<span className="text-muted-foreground/70 tabular-nums">{countForPill(pill.id)}</span>
+											</SelectItem>
+										))}
+									</SelectContent>
+								</Select>
 								<div className="flex shrink-0 items-center gap-1">
 									{triageFilter === "SKIP" && globalStats && globalStats.skipped > 0 && (
 										<button
@@ -688,7 +712,7 @@ export default function JobsPage() {
 								</div>
 							</div>
 
-							<div className="flex items-center justify-between gap-3">
+							<div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
 								<div className="flex items-center gap-2 min-w-0">
 									<h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground shrink-0">
 										{t("discover.caption.top")}
@@ -697,7 +721,7 @@ export default function JobsPage() {
 										type="button"
 										onClick={() => (selecting ? exitSelecting() : setSelecting(true))}
 										aria-pressed={selecting}
-										className={`inline-flex shrink-0 items-center gap-1.5 h-8 px-3 rounded-full text-[13px] font-medium touch-manipulation motion-safe:transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none ${
+										className={`my-2 inline-flex shrink-0 items-center gap-1.5 h-8 px-3 rounded-full text-[13px] font-medium touch-manipulation motion-safe:transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none ${
 											selecting
 												? "bg-primary text-primary-foreground font-semibold"
 												: "border border-border bg-card text-foreground hover:bg-muted"
@@ -713,7 +737,7 @@ export default function JobsPage() {
 										setActiveTab(value as "best" | "newest" | "saved")
 									}
 								>
-									<TabsList>
+									<TabsList className="max-w-full overflow-x-auto">
 										<TabsTrigger value="best">
 											{t("discover.tabs.recommended")}
 										</TabsTrigger>
@@ -849,8 +873,14 @@ export default function JobsPage() {
 				onClose={() => setIsAddJobOpen(false)}
 				onAdded={(jobId) => {
 					setIsAddJobOpen(false);
+					// Clear any active search/filter/tab so the new job is not hidden by them.
 					setTriageFilter("all");
-					fetchJobs();
+					setSearchInput("");
+					setSearchQuery("");
+					setLocationQuery("");
+					setRemoteFilter("all");
+					setActiveTab("best");
+					fetchJobs({ searchQuery: "", locationQuery: "", remoteFilter: "all", activeTab: "best" });
 					if (jobId) setDrawerJobId(jobId);
 				}}
 			/>

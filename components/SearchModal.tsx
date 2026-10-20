@@ -10,7 +10,17 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Loader2, Search, Bookmark, Plus, X, RotateCcw } from "lucide-react";
+import {
+	Bookmark,
+	ChevronDown,
+	FileText,
+	Loader2,
+	Plus,
+	RotateCcw,
+	Search,
+	Sparkles,
+	X,
+} from "lucide-react";
 import {
 	mergeAvailableActors,
 	KNOWN_JOB_SOURCES,
@@ -20,9 +30,16 @@ import { orderFreeSources } from "@/lib/job-sources/free";
 import {
 	summarizeSearchOutcome,
 	type SearchSummary,
+	type SourceFailureInput,
+	type SourceOutcomeInput,
 } from "@/lib/jobs/search-summary";
+import type {
+	ParsedSearchQuery,
+	RoleSuggestion,
+} from "@/lib/jobs/search-strategy";
 import {
 	COUNTRY_OPTIONS,
+	countryName,
 	normalizeCountryCode,
 	sourceCoverageGroupTitle,
 	sourceCoverageLabel,
@@ -30,11 +47,50 @@ import {
 	sourceCoversCountry,
 } from "@/lib/job-sources/countries";
 import { useI18n } from "./I18nProvider";
+import { logoProxyUrl } from "@/lib/logo";
+
+// Public domains for source logos. Sources without an entry show no icon.
+const SOURCE_LOGO_DOMAINS: Record<string, string> = {
+	stepstone: "stepstone.de",
+	arbeitsagentur: "arbeitsagentur.de",
+	arbeitnow: "arbeitnow.com",
+	xing: "xing.com",
+	linkedin: "linkedin.com",
+	indeed: "indeed.com",
+	google: "google.com",
+	glassdoor: "glassdoor.com",
+	jobicy: "jobicy.com",
+	remoteok: "remoteok.com",
+	remotive: "remotive.com",
+	adzuna: "adzuna.com",
+};
+
+function SourceIcon({ sourceId }: { sourceId: string }) {
+	const domain = SOURCE_LOGO_DOMAINS[sourceId];
+	const [failed, setFailed] = useState(false);
+	if (!domain || failed) return null;
+	return (
+		<img
+			src={logoProxyUrl(domain, 32)}
+			alt=""
+			aria-hidden="true"
+			width={14}
+			height={14}
+			loading="lazy"
+			onError={() => setFailed(true)}
+			className="size-3.5 shrink-0 rounded-[3px] bg-white object-contain"
+		/>
+	);
+}
 
 export interface SearchModalProps {
 	isOpen: boolean;
 	onClose: () => void;
 	onSearchComplete: (jobIds?: string[]) => void;
+}
+
+interface RoleChoice extends RoleSuggestion {
+	excluded: boolean;
 }
 
 export interface SearchPreset {
@@ -99,6 +155,13 @@ export function SearchModal({
 	const [error, setError] = useState<string | null>(null);
 	const [summary, setSummary] = useState<SearchSummary | null>(null);
 	const [needsProfileSetup, setNeedsProfileSetup] = useState(false);
+
+	// Natural-language search and CV-based role suggestions
+	const [nlQuery, setNlQuery] = useState("");
+	const [parsing, setParsing] = useState(false);
+	const [suggesting, setSuggesting] = useState(false);
+	const [roleChoices, setRoleChoices] = useState<RoleChoice[]>([]);
+	const [showAdvanced, setShowAdvanced] = useState(false);
 
 	// Presets state
 	const [presets, setPresets] = useState<SearchPreset[]>([]);
@@ -314,8 +377,119 @@ export function SearchModal({
 		);
 	};
 
+	const noSourcesSelected =
+		selectedActors.length === 0 && selectedFree.length === 0;
+
+	const includedRoleCount =
+		roleChoices.length > 0
+			? roleChoices.filter((role) => !role.excluded).length
+			: title.trim()
+				? 1
+				: 0;
+	const searchPlace = location.trim()
+		? `${countryName(country)}, ${location.trim()}`
+		: countryName(country);
+	const workplaceSummary =
+		remote === "remote"
+			? t("search.remoteOnly")
+			: remote === "hybrid"
+				? t("discover.workplace.hybrid")
+				: remote === "onsite"
+					? t("discover.workplace.onsite")
+					: t("search.anyWorkplace");
+
+	const toggleRoleChoice = (index: number) => {
+		setRoleChoices((current) =>
+			current.map((role, i) =>
+				i === index ? { ...role, excluded: !role.excluded } : role,
+			),
+		);
+	};
+
+	const handleParseQuery = async () => {
+		const query = nlQuery.trim();
+		if (!query || parsing) return;
+		setParsing(true);
+		setError(null);
+		try {
+			const res = await fetch("/api/jobs/search/parse", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ query }),
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok || !data.success) {
+				setError(data.error || t("search.parseFailed"));
+				return;
+			}
+			const parsed = data.query as ParsedSearchQuery;
+			if (parsed.roles.length > 0) {
+				setRoleChoices(
+					parsed.roles.map((role) => ({
+						title: role,
+						keywords: parsed.keywords,
+						excluded: false,
+					})),
+				);
+				setTitle(parsed.roles[0]);
+			} else {
+				setRoleChoices([]);
+				if (parsed.keywords.length > 0) {
+					setTitle(parsed.keywords.join(" "));
+				}
+			}
+			if (parsed.country) chooseCountry(parsed.country);
+			setLocation(parsed.location);
+			setRemote(parsed.remote);
+			setDatePosted(parsed.datePosted);
+			setActivePresetId(null);
+		} catch (err) {
+			setError((err as Error).message);
+		} finally {
+			setParsing(false);
+		}
+	};
+
+	const handleSuggestRoles = async () => {
+		if (suggesting) return;
+		setSuggesting(true);
+		setError(null);
+		try {
+			const res = await fetch("/api/jobs/search/strategy", { method: "POST" });
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok || !data.success) {
+				setError(data.error || t("search.suggestFailed"));
+				return;
+			}
+			const roles = data.roles as RoleSuggestion[];
+			setRoleChoices(roles.map((role) => ({ ...role, excluded: false })));
+			setTitle(roles[0].title);
+			setActivePresetId(null);
+			const suggestedLocations: string[] = Array.isArray(data.locations)
+				? data.locations
+				: [];
+			if (suggestedLocations.length > 0 && !location.trim()) {
+				setLocation(suggestedLocations[0]);
+			}
+		} catch (err) {
+			setError((err as Error).message);
+		} finally {
+			setSuggesting(false);
+		}
+	};
+
 	const handleSubmit = async (e: React.FormEvent) => {
 		e.preventDefault();
+		const searchTitles =
+			roleChoices.length > 0
+				? roleChoices
+						.filter((role) => !role.excluded)
+						.map((role) => role.title)
+				: [title.trim()];
+		if (searchTitles.length === 0 || !searchTitles[0]) {
+			setError(t("search.noRolesSelected"));
+			return;
+		}
 		setLoading(true);
 		setLoadingPhase("searching");
 		setError(null);
@@ -338,24 +512,60 @@ export function SearchModal({
 		} catch {}
 
 		try {
-			const res = await fetch("/api/jobs/search", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({
-					title,
-					country,
-					location,
-					remote,
-					actors: selectedActors,
-					freeSources: selectedFree,
-					datePosted,
-					limit,
-				}),
-			});
-			const data = await res.json();
-			if (res.ok && data.success) {
-				const jobIds = Array.isArray(data.jobIds) ? data.jobIds : [];
-				setNeedsProfileSetup(Boolean(data.needsProfileSetup));
+			const jobIdList: string[] = [];
+			const results: SourceOutcomeInput[] = [];
+			const failedSources: SourceFailureInput[] = [];
+			let newJobs = 0;
+			let needsSetup = false;
+			// One search per accepted role; results are merged and triaged once.
+			for (const searchTitle of searchTitles) {
+				const res = await fetch("/api/jobs/search", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						title: searchTitle,
+						country,
+						location,
+						remote,
+						actors: selectedActors,
+						freeSources: selectedFree,
+						datePosted,
+						limit,
+					}),
+				});
+				// The server can return a non-JSON body (proxy timeout, HTML error page).
+				const payload = await res.json().catch(() => ({}));
+				if (!res.ok || !payload.success) {
+					setError(
+						payload.error ||
+							`Job search failed (HTTP ${res.status}). Please try again.`,
+					);
+					return;
+				}
+				jobIdList.push(
+					...(Array.isArray(payload.jobIds) ? payload.jobIds : []),
+				);
+				results.push(
+					...(Array.isArray(payload.results) ? payload.results : []),
+				);
+				failedSources.push(
+					...(Array.isArray(payload.failedSources)
+						? payload.failedSources
+						: []),
+				);
+				newJobs += Number(payload.newJobs) || 0;
+				needsSetup = needsSetup || Boolean(payload.needsProfileSetup);
+			}
+
+			const data = {
+				jobIds: Array.from(new Set(jobIdList)),
+				newJobs,
+				results,
+				failedSources,
+				needsProfileSetup: needsSetup,
+			};
+			const jobIds = data.jobIds;
+			setNeedsProfileSetup(data.needsProfileSetup);
 				if (jobIds.length > 0) {
 					setLoadingPhase("triaging");
 					const triageRes = await fetch("/api/jobs/triage", {
@@ -380,9 +590,6 @@ export function SearchModal({
 
 				onSearchComplete(jobIds);
 				setSummary(summarizeSearchOutcome(data.results, data.failedSources));
-			} else {
-				setError(data.error || "Failed to execute job discovery");
-			}
 		} catch (err) {
 			setError((err as Error).message);
 		} finally {
@@ -491,7 +698,122 @@ export function SearchModal({
 					)}
 				</div>
 
+				{/* Natural-language search and CV-based role suggestions */}
+				<div className="space-y-3 rounded-2xl border border-neutral-200/80 bg-white p-3.5">
+					<div className="space-y-1.5">
+						<Label
+							htmlFor="search-nl"
+							className="text-xs font-medium text-neutral-700"
+						>
+							{t("search.nlLabel")}
+						</Label>
+						<div className="flex gap-2">
+							<Input
+								id="search-nl"
+								value={nlQuery}
+								onChange={(e) => setNlQuery(e.target.value)}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") {
+										e.preventDefault();
+										handleParseQuery();
+									}
+								}}
+								placeholder={t("search.nlPh")}
+								className="h-9 text-xs"
+							/>
+							<Button
+								type="button"
+								variant="outline"
+								size="sm"
+								onClick={handleParseQuery}
+								disabled={parsing || !nlQuery.trim()}
+								className="text-xs shrink-0"
+							>
+								{parsing ? (
+									<Loader2 className="size-3.5 animate-spin" />
+								) : (
+									<Sparkles className="size-3.5" />
+								)}
+								<span>{t("search.nlApply")}</span>
+							</Button>
+						</div>
+					</div>
+
+					<div className="flex flex-wrap items-center justify-between gap-2">
+						<span className="text-xs text-neutral-500">
+							{t("search.suggestHint")}
+						</span>
+						<Button
+							type="button"
+							variant="outline"
+							size="sm"
+							onClick={handleSuggestRoles}
+							disabled={suggesting}
+							className="text-xs"
+						>
+							{suggesting ? (
+								<Loader2 className="size-3.5 animate-spin" />
+							) : (
+								<FileText className="size-3.5" />
+							)}
+							<span>{t("search.suggestRoles")}</span>
+						</Button>
+					</div>
+
+					{roleChoices.length > 0 && (
+						<div className="space-y-2">
+							<p className="text-xs font-medium text-neutral-700">
+								{t("search.rolesLabel")}
+							</p>
+							<div className="flex flex-wrap gap-1.5">
+								{roleChoices.map((role, index) => (
+									<button
+										key={`${role.title}-${index}`}
+										type="button"
+										aria-pressed={!role.excluded}
+										title={role.keywords.join(", ")}
+										onClick={() => toggleRoleChoice(index)}
+										className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium cursor-pointer transition-colors ${
+											role.excluded
+												? "border-neutral-200 bg-white text-neutral-400 line-through hover:border-neutral-300"
+												: "border-blue-500 bg-blue-50/80 text-blue-800"
+										}`}
+									>
+										<span>{role.title}</span>
+										{role.excluded ? (
+											<Plus className="size-3" />
+										) : (
+											<X className="size-3" />
+										)}
+									</button>
+								))}
+							</div>
+							<p className="text-xs text-neutral-500">
+								{t("search.rolesHint")}
+							</p>
+						</div>
+					)}
+					<p className="text-xs text-neutral-500">
+						{t("search.summary", {
+							roles: includedRoleCount,
+							sources: selectedActors.length + selectedFree.length,
+							place: searchPlace,
+							workplace: workplaceSummary,
+						})}
+					</p>
+				</div>
+
 				<form onSubmit={handleSubmit} className="space-y-5 pt-1">
+					<details
+						open={showAdvanced || noSourcesSelected}
+						onToggle={(e) => setShowAdvanced(e.currentTarget.open)}
+						className="group rounded-2xl border border-neutral-200/80 p-3.5"
+					>
+						<summary className="flex cursor-pointer list-none items-center justify-between text-xs font-semibold text-neutral-700">
+							<span>{t("search.advanced")}</span>
+							<ChevronDown className="size-3.5 text-neutral-500 transition-transform group-open:rotate-180" />
+						</summary>
+					<div className="mt-4 space-y-5">
 					<div className="space-y-1.5">
 						<Label
 							htmlFor="search-title"
@@ -508,7 +830,7 @@ export function SearchModal({
 							}}
 							placeholder={t("search.titlePh")}
 							className="h-10 text-sm"
-							required
+							required={roleChoices.length === 0}
 						/>
 					</div>
 
@@ -605,6 +927,11 @@ export function SearchModal({
 							<div className="space-y-2 flex-1 min-w-0 rounded-2xl border border-blue-200 bg-blue-50/80 p-3 shadow-xs dark:border-blue-500/20 dark:bg-blue-500/8">
 								<Label className="text-xs font-medium text-neutral-700">
 									{t("search.apify")}{" "}
+									{selectedActors.length > 0 && (
+										<span className="ml-1 rounded-full bg-blue-600 px-1.5 text-[10px] font-semibold text-white tabular-nums">
+											{selectedActors.length}
+										</span>
+									)}
 									<span className="font-normal text-neutral-400">
 										({t("search.apifyHint")})
 									</span>
@@ -643,6 +970,7 @@ export function SearchModal({
 														onChange={() => toggleActor(source.actorId)}
 														className="size-3.5 rounded border-neutral-300 cursor-pointer text-blue-600"
 													/>
+													<SourceIcon sourceId={source.id} />
 													<span>{shortName}</span>
 													<span className="text-neutral-400 font-normal">
 														{covered ? coverageLabel : t("search.other")}
@@ -676,6 +1004,11 @@ export function SearchModal({
 						<div className="space-y-2 rounded-2xl border border-emerald-200 bg-emerald-50/75 p-3 shadow-xs dark:border-emerald-500/20 dark:bg-emerald-500/8">
 							<Label className="text-xs font-medium text-neutral-700">
 								{t("search.freeSources")}{" "}
+								{selectedFree.length > 0 && (
+									<span className="ml-1 rounded-full bg-emerald-600 px-1.5 text-[10px] font-semibold text-white tabular-nums">
+										{selectedFree.length}
+									</span>
+								)}
 								<span className="font-normal text-neutral-400">
 									({t("search.noApifyCost")})
 								</span>
@@ -740,6 +1073,7 @@ export function SearchModal({
 														className={`size-1.5 rounded-full ${ready ? "bg-emerald-500" : "bg-amber-400"}`}
 														aria-hidden="true"
 													/>
+													<SourceIcon sourceId={source.id} />
 													<span>{source.name}</span>
 													<span className="text-neutral-400 font-normal">
 														{covered
@@ -810,7 +1144,7 @@ export function SearchModal({
 							<ul className="flex flex-col gap-1">
 								{summary.lines.map((line) => (
 									<li
-										key={line.source}
+										key={`line-${line.source}`}
 										className="flex flex-wrap items-baseline justify-between gap-2 text-xs"
 									>
 										<span className="font-medium text-neutral-700">
@@ -828,7 +1162,7 @@ export function SearchModal({
 								))}
 								{summary.failures.map((failure) => (
 									<li
-										key={failure.source}
+										key={`failure-${failure.source}`}
 										className="flex flex-wrap items-baseline justify-between gap-2 text-xs"
 									>
 										<span className="font-medium text-neutral-700">
@@ -866,6 +1200,9 @@ export function SearchModal({
 							</div>
 						</div>
 					)}
+
+					</div>
+					</details>
 
 					<div className="flex items-center justify-between pt-2 border-t border-neutral-100">
 						<button
@@ -923,7 +1260,7 @@ export function SearchModal({
 										? loadingPhase === "triaging"
 											? t("search.triaging")
 											: t("search.finding")
-										: t("discover.findRoles")}
+										: t("search.searchJobs")}
 								</span>
 							</Button>
 						</div>

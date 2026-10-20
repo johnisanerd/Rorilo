@@ -12,14 +12,9 @@ interface CompanyLogoProps {
   className?: string;
 }
 
-function initials(name: string): string {
-  const words = name
-    .replace(/[()]/g, ' ')
-    .split(/[\s\-/&]+/)
-    .filter((word) => word && /[a-zA-Z0-9]/.test(word[0]));
-  if (words.length === 0) return '?';
-  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
-  return `${words[0][0]}${words[1][0]}`.toUpperCase();
+function monogram(name: string): string {
+  const match = name.trim().match(/[a-zA-Z0-9]/);
+  return match ? match[0].toUpperCase() : '?';
 }
 
 function hueFor(name: string): number {
@@ -65,16 +60,16 @@ export function CompanyLogo({
         style={{
           width: size,
           height: size,
-          fontSize: Math.max(10, Math.round(size * 0.34)),
-          backgroundColor: `hsl(${hue} 70% 90%)`,
-          color: `hsl(${hue} 45% 30%)`,
+          fontSize: Math.max(12, Math.round(size * 0.5)),
+          backgroundColor: `hsl(${hue} 22% 16%)`,
+          color: `hsl(${hue} 30% 94%)`,
         }}
         className={cn(
-          'inline-flex shrink-0 items-center justify-center rounded-[10px] font-bold select-none ring-1 ring-black/[0.06]',
+          'inline-flex shrink-0 items-center justify-center rounded-[10px] font-heading font-bold leading-none select-none ring-1 ring-black/[0.12]',
           className
         )}
       >
-        {initials(company)}
+        {monogram(company)}
       </span>
     );
   }

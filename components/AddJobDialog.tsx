@@ -132,6 +132,7 @@ export function AddJobDialog({ open, onClose, onAdded }: AddJobDialogProps) {
       }
       const newId = await postJob({
         url: extracted.url || undefined,
+        contactEmail: extracted.contactEmail || undefined,
         title: extracted.title,
         company: extracted.company,
         location: extracted.location || undefined,
