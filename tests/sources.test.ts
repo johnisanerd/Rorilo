@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { mergeAvailableActors, KNOWN_JOB_SOURCES, resolveSourceAdapter, orderApifyPicker } from '../lib/job-sources/sources';
+import { mergeAvailableActors, KNOWN_JOB_SOURCES, resolveSourceAdapter, orderApifyPicker, adaptGoogleJobPayload } from '../lib/job-sources/sources';
+import { normalizeJobPayload } from '../lib/jobs/normalize';
 
 describe('Available actor merging', () => {
   it('unions saved actors with built-in defaults, saved first', () => {
@@ -56,5 +57,72 @@ describe('Available actor merging', () => {
     expect(ordered.slice(0, firstCountrySource).every((source) => source.coverage.global)).toBe(true);
     expect(ordered[firstCountrySource].coverage.countries || ordered[firstCountrySource].coverage.regions).toBeTruthy();
     expect(ordered[0].name).toBe('Indeed');
+  });
+});
+
+const googleJobRows = [
+  {
+    title: 'Backend Engineer',
+    job_title: 'Backend Engineer',
+    company_name: 'Northwind Labs',
+    location: 'Berlin, Germany',
+    description: 'Build APIs.',
+    job_id: 'gj-1001',
+    share_link: 'https://www.google.com/search?q=job-1001',
+    apply_options: [{ title: 'Apply', link: 'https://jobs.example.com/1001' }],
+  },
+  {
+    title: 'Data Analyst',
+    company_name: 'Harbor Co',
+    location: 'London, UK',
+    description: 'Analyze reports.',
+    job_id: 'gj-1002',
+    share_link: 'https://www.google.com/search?q=job-1002',
+    apply_options: [],
+  },
+];
+
+describe('Google Jobs actor', () => {
+  it('points the source at johnvc and keeps it off by default', () => {
+    const adapter = resolveSourceAdapter('google');
+    expect(adapter.actorId).toBe('johnvc/Google-Jobs-Scraper');
+    expect(KNOWN_JOB_SOURCES.google.defaultEnabled).toBe(false);
+  });
+
+  it('builds the johnvc input and skips country codes Google Jobs does not serve', () => {
+    const adapter = resolveSourceAdapter('google');
+    expect(adapter.buildInput({ title: 'Backend', keywords: ['Python'], country: 'DE', location: 'Berlin', limit: 5 })).toEqual({
+      query: 'Backend Python',
+      location: 'Berlin',
+      country: 'de',
+      num_results: 5,
+      max_pagination: 1,
+    });
+    expect(adapter.buildInput({ title: 'Analyst', country: 'GB', limit: 20 }).country).toBe('uk');
+    const france = adapter.buildInput({ title: 'Analyst', country: 'FR', location: 'Paris', limit: 10 });
+    expect(france.location).toBe('Paris');
+    expect(france.country).toBeUndefined();
+  });
+
+  it('maps recorded johnvc rows onto the existing normalizer fields', () => {
+    const jobs = googleJobRows.map((row) => normalizeJobPayload(adaptGoogleJobPayload(row), 'Google Jobs'));
+
+    expect(jobs[0]).toMatchObject({
+      title: 'Backend Engineer',
+      company: 'Northwind Labs',
+      location: 'Berlin, Germany',
+      sourceJobId: 'gj-1001',
+      applicationUrl: 'https://jobs.example.com/1001',
+      originalUrl: 'https://www.google.com/search?q=job-1001',
+    });
+    expect(jobs[1]).toMatchObject({
+      title: 'Data Analyst',
+      company: 'Harbor Co',
+      location: 'London, UK',
+      sourceJobId: 'gj-1002',
+      applicationUrl: 'https://www.google.com/search?q=job-1002',
+      originalUrl: 'https://www.google.com/search?q=job-1002',
+    });
+    expect(adaptGoogleJobPayload(googleJobRows[0]).company_name).toBe('Northwind Labs');
   });
 });

@@ -148,14 +148,30 @@ export const KNOWN_JOB_SOURCES: Record<string, JobSourceDefinition> = {
     name: 'Google Jobs',
     tagline: 'Aggregated listings across thousands of career sites',
     coverage: { global: true },
-    actorId: 'apify/google-jobs-scraper',
+    actorId: 'johnvc/Google-Jobs-Scraper',
     defaultEnabled: false,
     buildInput: ({ title, keywords, country, location, limit }) => {
       const q = [title, ...(keywords || [])].filter(Boolean).join(' ').trim() || 'Software Engineer';
-      const query = location ? `${q} in ${location}` : `${q} in ${countryName(country)}`;
+      const code = (country || '').trim().toUpperCase();
+      // Google Jobs uses "uk", and a country it does not serve stops the run.
+      const googleCountry: Record<string, string> = {
+        DE: 'de',
+        AT: 'at',
+        CH: 'ch',
+        NL: 'nl',
+        ES: 'es',
+        IT: 'it',
+        US: 'us',
+        CA: 'ca',
+        GB: 'uk',
+      };
+      const countryCode = googleCountry[code];
       return {
-        queries: query,
-        maxItems: limit,
+        query: q,
+        location: location || countryName(country),
+        ...(countryCode ? { country: countryCode } : {}),
+        num_results: limit,
+        max_pagination: Math.max(1, Math.ceil(limit / 10)),
       };
     },
   },
@@ -176,6 +192,29 @@ export const KNOWN_JOB_SOURCES: Record<string, JobSourceDefinition> = {
     },
   },
 };
+
+/**
+ * Adds this repo's field names onto a johnvc Google Jobs row.
+ * Original keys are kept.
+ */
+export function adaptGoogleJobPayload(raw: Record<string, unknown>): Record<string, unknown> {
+  const options = raw.apply_options;
+  const first = Array.isArray(options) ? options[0] : undefined;
+  const firstLink =
+    first && typeof first === 'object' && first !== null && 'link' in first
+      ? (first as { link?: unknown }).link
+      : undefined;
+  const shareLink = typeof raw.share_link === 'string' ? raw.share_link : undefined;
+  const applyLink = typeof firstLink === 'string' && firstLink ? firstLink : shareLink;
+
+  return {
+    ...raw,
+    company: raw.company ?? raw.company_name,
+    applyUrl: raw.applyUrl ?? applyLink,
+    originalUrl: raw.originalUrl ?? shareLink,
+    jobId: raw.jobId ?? raw.job_id,
+  };
+}
 
 /**
  * Resolves an identifier (either a known source id like "stepstone" or an Apify actor ID)
