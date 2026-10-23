@@ -19,6 +19,35 @@ export interface JobSourceDefinition {
   }) => Record<string, unknown>;
 }
 
+/** Rorilo country codes this Google Jobs actor actually serves. GB maps to `uk`. */
+const GOOGLE_JOBS_COUNTRY: Record<string, string> = {
+  DE: 'de',
+  AT: 'at',
+  CH: 'ch',
+  NL: 'nl',
+  ES: 'es',
+  IT: 'it',
+  US: 'us',
+  CA: 'ca',
+  GB: 'uk',
+};
+
+/** Actor input schema rejects `num_results` below 10. */
+const GOOGLE_JOBS_MIN_RESULTS = 10;
+
+/**
+ * Maps a Rorilo country onto the actor country code.
+ * Throws for countries Google Jobs does not serve (FR, AU, PL in this app).
+ */
+function googleJobsCountry(country?: string): string {
+  const code = normalizeCountryCode(country);
+  const mapped = GOOGLE_JOBS_COUNTRY[code];
+  if (!mapped) {
+    throw new Error(`Google Jobs does not support ${code}. Choose another source for this country.`);
+  }
+  return mapped;
+}
+
 export const KNOWN_JOB_SOURCES: Record<string, JobSourceDefinition> = {
   // --- German / DACH Specialized Sources ---
   stepstone: {
@@ -147,31 +176,18 @@ export const KNOWN_JOB_SOURCES: Record<string, JobSourceDefinition> = {
     id: 'google',
     name: 'Google Jobs',
     tagline: 'Aggregated listings across thousands of career sites',
-    coverage: { global: true },
+    coverage: { countries: Object.keys(GOOGLE_JOBS_COUNTRY) },
     actorId: 'johnvc/Google-Jobs-Scraper',
     defaultEnabled: false,
     buildInput: ({ title, keywords, country, location, limit }) => {
       const q = [title, ...(keywords || [])].filter(Boolean).join(' ').trim() || 'Software Engineer';
-      const code = (country || '').trim().toUpperCase();
-      // Google Jobs uses "uk", and a country it does not serve stops the run.
-      const googleCountry: Record<string, string> = {
-        DE: 'de',
-        AT: 'at',
-        CH: 'ch',
-        NL: 'nl',
-        ES: 'es',
-        IT: 'it',
-        US: 'us',
-        CA: 'ca',
-        GB: 'uk',
-      };
-      const countryCode = googleCountry[code];
+      const numResults = Math.max(GOOGLE_JOBS_MIN_RESULTS, limit);
       return {
         query: q,
         location: location || countryName(country),
-        ...(countryCode ? { country: countryCode } : {}),
-        num_results: limit,
-        max_pagination: Math.max(1, Math.ceil(limit / 10)),
+        country: googleJobsCountry(country),
+        num_results: numResults,
+        max_pagination: Math.max(1, Math.ceil(numResults / 10)),
       };
     },
   },

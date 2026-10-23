@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { mergeAvailableActors, KNOWN_JOB_SOURCES, resolveSourceAdapter, orderApifyPicker, adaptGoogleJobPayload } from '../lib/job-sources/sources';
+import { sourceCoversCountry } from '../lib/job-sources/countries';
 import { normalizeJobPayload } from '../lib/jobs/normalize';
 
 describe('Available actor merging', () => {
@@ -89,19 +90,39 @@ describe('Google Jobs actor', () => {
     expect(KNOWN_JOB_SOURCES.google.defaultEnabled).toBe(false);
   });
 
-  it('builds the johnvc input and skips country codes Google Jobs does not serve', () => {
+  it('clamps num_results to the actor minimum of 10', () => {
     const adapter = resolveSourceAdapter('google');
     expect(adapter.buildInput({ title: 'Backend', keywords: ['Python'], country: 'DE', location: 'Berlin', limit: 5 })).toEqual({
       query: 'Backend Python',
       location: 'Berlin',
       country: 'de',
-      num_results: 5,
+      num_results: 10,
       max_pagination: 1,
     });
-    expect(adapter.buildInput({ title: 'Analyst', country: 'GB', limit: 20 }).country).toBe('uk');
-    const france = adapter.buildInput({ title: 'Analyst', country: 'FR', location: 'Paris', limit: 10 });
-    expect(france.location).toBe('Paris');
-    expect(france.country).toBeUndefined();
+    expect(adapter.buildInput({ title: 'Dev', country: 'DE', limit: 3 }).num_results).toBe(10);
+    expect(adapter.buildInput({ title: 'Dev', country: 'DE', limit: 9 }).num_results).toBe(10);
+    const twenty = adapter.buildInput({ title: 'Analyst', country: 'GB', limit: 20 });
+    expect(twenty.country).toBe('uk');
+    expect(twenty.num_results).toBe(20);
+    expect(twenty.max_pagination).toBe(2);
+  });
+
+  it('rejects countries Google Jobs does not serve', () => {
+    const adapter = resolveSourceAdapter('google');
+    for (const country of ['FR', 'AU', 'PL'] as const) {
+      expect(() => adapter.buildInput({ title: 'Analyst', country, location: 'Paris', limit: 10 })).toThrow(
+        `Google Jobs does not support ${country}. Choose another source for this country.`
+      );
+    }
+  });
+
+  it('is not offered as a global source for unsupported countries', () => {
+    expect(KNOWN_JOB_SOURCES.google.coverage.global).toBeUndefined();
+    expect(sourceCoversCountry(KNOWN_JOB_SOURCES.google.coverage, 'DE')).toBe(true);
+    expect(sourceCoversCountry(KNOWN_JOB_SOURCES.google.coverage, 'GB')).toBe(true);
+    expect(sourceCoversCountry(KNOWN_JOB_SOURCES.google.coverage, 'FR')).toBe(false);
+    expect(sourceCoversCountry(KNOWN_JOB_SOURCES.google.coverage, 'AU')).toBe(false);
+    expect(sourceCoversCountry(KNOWN_JOB_SOURCES.google.coverage, 'PL')).toBe(false);
   });
 
   it('maps recorded johnvc rows onto the existing normalizer fields', () => {
